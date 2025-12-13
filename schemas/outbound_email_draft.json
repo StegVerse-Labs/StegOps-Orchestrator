@@ -1,0 +1,33 @@
+{
+  "name": "outbound_email_draft",
+  "schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "subject": {
+        "type": "string"
+      },
+      "body": {
+        "type": "string"
+      },
+      "cta": {
+        "type": "string"
+      },
+      "requires_approval": {
+        "type": "boolean"
+      },
+      "follow_up_in_days": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 21
+      }
+    },
+    "required": [
+      "subject",
+      "body",
+      "cta",
+      "requires_approval",
+      "follow_up_in_days"
+    ]
+  }
+}
