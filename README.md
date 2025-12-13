@@ -1,13 +1,44 @@
-# StegOps Orchestrator (Gmail + CRM-Lite)
+# StegOps Orchestrator — Full Gmail Send/Receive (Workspace)
 
-FastAPI + Postgres orchestration for:
-- Gmail inbound/outbound
-- CRM-Lite pipeline
-- OpenAI Responses API drafting/classification (Structured Outputs)
+This repo provides:
+- Gmail OAuth connect (store refresh token)
+- Gmail Push (Pub/Sub → webhook) + history processing
+- Ingest inbound messages into CRM-Lite
+- Call OpenAI (Responses API + Structured Outputs) to classify + draft replies
+- Create Gmail draft replies (human approval by default)
+- Optional auto-send for low-risk replies (disabled by default)
 
-Key references:
-- OpenAI Responses API: https://platform.openai.com/docs/api-reference/responses
-- OpenAI Function calling: https://platform.openai.com/docs/guides/function-calling
-- OpenAI Structured Outputs: https://platform.openai.com/docs/guides/structured-outputs
-- Gmail push notifications: https://developers.google.com/workspace/gmail/api/guides/push
-- Gmail users.watch: https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/watch
+## Key endpoints
+### OAuth
+- `GET /v1/auth/google/start`
+- `GET /v1/auth/google/callback`
+
+### Gmail
+- `POST /v1/gmail/watch/start?email=<mailbox>`
+- `POST /v1/gmail/history/poll?email=<mailbox>`
+- `POST /v1/webhooks/gmail/push` (Pub/Sub push)
+- `POST /v1/gmail/drafts/send?email=<mailbox>`
+
+### Health
+- `GET /health`
+
+## Local run
+1) Install deps:
+```bash
+pip install -r requirements.txt
+```
+
+2) Configure `.env` (copy from `.env.example`)
+
+3) Init DB:
+```bash
+psql "$DATABASE_URL" -f migrations/001_init.sql
+```
+
+4) Run:
+```bash
+uvicorn app.main:app --reload --port 8080
+```
+
+## Setup guide
+See: `docs/GMAIL_FULL_SETUP.md`
