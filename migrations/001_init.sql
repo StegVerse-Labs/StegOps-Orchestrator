@@ -65,3 +65,24 @@ CREATE TABLE IF NOT EXISTS gmail_state (
   last_history_id VARCHAR(64),
   updated_at TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
 );
+
+
+CREATE TABLE IF NOT EXISTS documents (
+  id SERIAL PRIMARY KEY,
+  deal_id INTEGER REFERENCES deals(id) ON DELETE SET NULL,
+  doc_type VARCHAR(50) NOT NULL,
+  status VARCHAR(30) NOT NULL DEFAULT 'draft',
+  storage_url VARCHAR(500),
+  content TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
+);
+
+
+CREATE TABLE IF NOT EXISTS invoices (
+  id SERIAL PRIMARY KEY,
+  deal_id INTEGER REFERENCES deals(id) ON DELETE SET NULL,
+  amount_usd NUMERIC(12,2) NOT NULL,
+  status VARCHAR(30) NOT NULL DEFAULT 'draft',
+  external_id VARCHAR(200),
+  created_at TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
+);
