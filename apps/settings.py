@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     PUBSUB_VERIFICATION_TOKEN: str | None = None
 
+    STRIPE_API_KEY: str | None = None
+
     AUTO_CREATE_DRAFTS: bool = True
     AUTO_SEND_LOW_RISK: bool = False
 
