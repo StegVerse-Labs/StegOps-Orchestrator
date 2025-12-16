@@ -1,72 +1,74 @@
 #!/usr/bin/env python3
-import json
 import os
-from typing import Any, Dict, List
+import shutil
+from datetime import datetime
+from pathlib import Path
 
-from openai import OpenAI
+from scripts.archive_ai_entity import classify_text
 
-DEFAULT_MODEL = os.getenv("STEGARCHIVE_MODEL", "gpt-5.2")
+REPO = Path(__file__).resolve().parents[1]
 
-SYSTEM = """You are StegArchive AI Entity.
-Classify conversation exports for StegVerse.
+INBOX = REPO / "inbox"
+ACTIVE_DIR = REPO / "processed" / "active"
+ARCHIVED_DIR = REPO / "processed" / "archived"
 
-Rules:
-- "active" if it directly advances current StegVerse work: SCW/StegCore/StegSocial automation, repo workflows,
-  deployment, PAT/secrets, ops/runbooks, tax/VA claims docs, memoir preservation, NCAA ingestion engine, patent engine.
-- "archived" if it is outdated simulations, one-off device Q&A, XR/MetaQuest, generic Kali/bash escalation,
-  political posting content, or clearly historical/moot.
+# Prefer your current structure shown in screenshots
+INDEX_PRIMARY = REPO / "apps" / "routers" / "ARCHIVE" / "COMBINED_ARCHIVE_LIST.md"
+INDEX_FALLBACK = REPO / "ARCHIVE" / "COMBINED_ARCHIVE_LIST.md"
 
-Return STRICT JSON only with:
-{
-  "classification": "active" | "archived",
-  "tags": ["tag1","tag2",...],   # lowercase, dashes ok, max 8
-  "summary": "1-2 sentences",
-  "confidence": 0.0-1.0
-}
-No extra keys. No markdown.
-"""
+def get_index_path() -> Path:
+    if INDEX_PRIMARY.exists() or INDEX_PRIMARY.parent.exists():
+        return INDEX_PRIMARY
+    return INDEX_FALLBACK
 
-def _safe_json_loads(s: str) -> Dict[str, Any]:
-    s = (s or "").strip()
-    try:
-        return json.loads(s)
-    except Exception:
-        start = s.find("{")
-        end = s.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(s[start:end + 1])
-        raise
+def ensure_dirs(index_path: Path):
+    INBOX.mkdir(parents=True, exist_ok=True)
+    ACTIVE_DIR.mkdir(parents=True, exist_ok=True)
+    ARCHIVED_DIR.mkdir(parents=True, exist_ok=True)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
 
-def classify_text(text: str) -> Dict[str, Any]:
-    # OpenAI SDK reads OPENAI_API_KEY from environment automatically
-    client = OpenAI()
+    if not index_path.exists():
+        index_path.write_text(
+            "# StegVerse Combined Archive List\n\n## Auto-log\n",
+            encoding="utf-8"
+        )
 
-    resp = client.responses.create(
-        model=DEFAULT_MODEL,
-        instructions=SYSTEM,
-        input=(text or "")[:120_000],  # guardrail for huge dumps
+def append_log(index_path: Path, filename: str, result: dict, dest_rel: str):
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    line = (
+        f"- `{ts}` — `{dest_rel}` → **{result['classification'].upper()}** "
+        f"(conf={result['confidence']:.2f}) tags={result['tags']} — {result['summary']}\n"
     )
+    with index_path.open("a", encoding="utf-8") as f:
+        f.write(line)
 
-    data = _safe_json_loads(resp.output_text)
+def main():
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is not set. Add it as a GitHub Actions secret.")
 
-    cls = data.get("classification")
-    if cls not in ("active", "archived"):
-        cls = "active"
+    index_path = get_index_path()
+    ensure_dirs(index_path)
 
-    tags = data.get("tags") or []
-    if not isinstance(tags, list):
-        tags = []
-    tags = [str(t).strip().lower().replace(" ", "-") for t in tags if str(t).strip()]
-    tags = tags[:8]
+    files = sorted(INBOX.glob("*.md"))
+    if not files:
+        print("No .md files in inbox/. Nothing to do.")
+        return
 
-    summary = str(data.get("summary") or "").strip()
-    if not summary:
-        summary = "No summary provided."
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        result = classify_text(text)
 
-    try:
-        conf = float(data.get("confidence", 0.5))
-    except Exception:
-        conf = 0.5
-    conf = max(0.0, min(1.0, conf))
+        if result["classification"] == "archived":
+            dest = ARCHIVED_DIR / path.name
+        else:
+            dest = ACTIVE_DIR / path.name
 
-    return {"classification": cls, "tags": tags, "summary": summary, "confidence": conf}
+        shutil.move(str(path), str(dest))
+
+        dest_rel = f"processed/{result['classification']}/{dest.name}"
+        print(f"{path.name} => {result['classification']} tags={result['tags']} conf={result['confidence']:.2f}")
+
+        append_log(index_path, dest.name, result, dest_rel)
+
+if __name__ == "__main__":
+    main()
