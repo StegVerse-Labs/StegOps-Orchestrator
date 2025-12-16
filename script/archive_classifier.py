@@ -2,96 +2,86 @@
 import os
 import shutil
 from datetime import datetime
+from pathlib import Path
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INBOX_DIR = os.path.join(BASE_DIR, "inbox")
-PROCESSED_ACTIVE = os.path.join(BASE_DIR, "processed", "active")
-PROCESSED_ARCHIVED = os.path.join(BASE_DIR, "processed", "archived")
-ARCHIVE_INDEX = os.path.join(BASE_DIR, "ARCHIVE", "COMBINED_ARCHIVE_LIST.md")
+from script.archive_ai_entity import classify_text
+from script.archive_status import write_status_md
 
-os.makedirs(PROCESSED_ACTIVE, exist_ok=True)
-os.makedirs(PROCESSED_ARCHIVED, exist_ok=True)
+REPO = Path(__file__).resolve().parents[1]
 
-# Simple keyword-based heuristics
-ARCHIVE_KEYWORDS = [
-    "meta quest", "xr", "headset",
-    "bash -p", "kali linux", "privilege escalation",
-    "emoji", "unicode", "steganography",
-    "gun law", "trump gun", "facebook summary",
-    "week 12 cfp", "week 13 cfp", "chaos bracket",
-    "nightmare bracket", "old simulation",
-    "geopolitical", "ukraine", "taiwan", "russia"
-]
+INBOX = REPO / "inbox"
+ACTIVE_DIR = REPO / "processed" / "active"
+ARCHIVED_DIR = REPO / "processed" / "archived"
 
-ACTIVE_HINTS = [
-    "scw v4", "stegcore", "stegverse infra", "patent engine",
-    "patent entity", "ncaa ingestion", "tax summary",
-    "memoir", "free-dom", "stegsocial", "stegtalk"
-]
+INDEX_PRIMARY = REPO / "apps" / "routers" / "ARCHIVE" / "COMBINED_ARCHIVE_LIST.md"
+INDEX_FALLBACK = REPO / "ARCHIVE" / "COMBINED_ARCHIVE_LIST.md"
 
+WATCHLIST = REPO / "apps" / "routers" / "ARCHIVE" / "watchlist.txt"
+STATUS_MD = REPO / "apps" / "routers" / "ARCHIVE" / "STATUS.md"
 
-def classify_content(text: str) -> str:
-    """
-    Returns 'archived' or 'active' based on simple heuristics.
-    You can override this later with AI from archive_ai_entity.py.
-    """
-    lower = text.lower()
+def get_index_path() -> Path:
+    if INDEX_PRIMARY.exists() or INDEX_PRIMARY.parent.exists():
+        return INDEX_PRIMARY
+    return INDEX_FALLBACK
 
-    # If clearly infra-related, force active
-    if any(hint in lower for hint in ACTIVE_HINTS):
-        return "active"
+def ensure_dirs(index_path: Path):
+    INBOX.mkdir(parents=True, exist_ok=True)
+    ACTIVE_DIR.mkdir(parents=True, exist_ok=True)
+    ARCHIVED_DIR.mkdir(parents=True, exist_ok=True)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # If it hits archive keywords, call it archived
-    if any(kw in lower for kw in ARCHIVE_KEYWORDS):
-        return "archived"
+    if not index_path.exists():
+        index_path.write_text(
+            "# StegVerse Combined Archive List\n\n## Auto-log\n",
+            encoding="utf-8"
+        )
 
-    # Fallback: treat as active unless clearly labelled
-    if "archive this" in lower or "ready to archive" in lower:
-        return "archived"
-
-    return "active"
-
-
-def append_to_archive_index(filename: str, classification: str):
-    """
-    Adds a small log line at the bottom of COMBINED_ARCHIVE_LIST.md
-    so you have a crude history of classifier decisions.
-    """
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rel_path = f"processed/{classification}/{filename}"
-
-    line = f"- `{ts}` — `{rel_path}` classified as **{classification.upper()}**\n"
-
-    with open(ARCHIVE_INDEX, "a", encoding="utf-8") as f:
-        f.write("\n" + line)
-
+def append_log(index_path: Path, filename: str, result: dict, dest_rel: str):
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    line = (
+        f"- `{ts}` — `{dest_rel}` → **{result['classification'].upper()}** "
+        f"(conf={result['confidence']:.2f}) tags={result['tags']} — {result['summary']}\n"
+    )
+    with index_path.open("a", encoding="utf-8") as f:
+        f.write(line)
 
 def main():
-    if not os.path.isdir(INBOX_DIR):
-        print(f"No inbox directory at {INBOX_DIR}. Nothing to do.")
-        return
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is not set. Add it as a GitHub Actions secret.")
 
-    files = [f for f in os.listdir(INBOX_DIR) if f.endswith(".md")]
+    index_path = get_index_path()
+    ensure_dirs(index_path)
+
+    files = sorted(INBOX.glob("*.md"))
+    last_archive_epoch = None
+
     if not files:
-        print("No new .md files in inbox/.")
+        print("No .md files in inbox/. Nothing to do.")
+        # Still update status against last known archive event = none
+        write_status_md(REPO, STATUS_MD, WATCHLIST, last_archive_epoch)
+        print(f"Wrote status: {STATUS_MD}")
         return
 
-    for fname in files:
-        src = os.path.join(INBOX_DIR, fname)
-        with open(src, "r", encoding="utf-8", errors="ignore") as f:
-            text = f.read()
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        result = classify_text(text)
 
-        classification = classify_content(text)
-        if classification == "archived":
-            dst = os.path.join(PROCESSED_ARCHIVED, fname)
+        if result["classification"] == "archived":
+            dest = ARCHIVED_DIR / path.name
+            # “Most recent archived file” timestamp anchor:
+            last_archive_epoch = int(datetime.utcnow().timestamp())
         else:
-            dst = os.path.join(PROCESSED_ACTIVE, fname)
+            dest = ACTIVE_DIR / path.name
 
-        shutil.move(src, dst)
-        print(f"{fname}: classified as {classification}, moved to {dst}")
+        shutil.move(str(path), str(dest))
+        dest_rel = f"processed/{result['classification']}/{dest.name}"
 
-        append_to_archive_index(fname, classification)
+        print(f"{path.name} => {result['classification']} tags={result['tags']} conf={result['confidence']:.2f}")
+        append_log(index_path, dest.name, result, dest_rel)
 
+    # Always refresh status after processing
+    write_status_md(REPO, STATUS_MD, WATCHLIST, last_archive_epoch)
+    print(f"Wrote status: {STATUS_MD}")
 
 if __name__ == "__main__":
     main()
