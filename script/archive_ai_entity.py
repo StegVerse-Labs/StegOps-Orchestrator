@@ -1,68 +1,72 @@
 #!/usr/bin/env python3
+import json
 import os
-from typing import Dict, Any
+from typing import Any, Dict, List
 
-"""
-Optional AI helper for StegArchive.
+from openai import OpenAI
 
-To enable:
-- pip install openai
-- export OPENAI_API_KEY=sk-...
-- call classify_with_ai(text) from archive_classifier.py instead of classify_content()
-"""
+DEFAULT_MODEL = os.getenv("STEGARCHIVE_MODEL", "gpt-5.2")
 
-try:
-    import openai
-except ImportError:
-    openai = None
+SYSTEM = """You are StegArchive AI Entity.
+Classify conversation exports for StegVerse.
 
+Rules:
+- "active" if it directly advances current StegVerse work: SCW/StegCore/StegSocial automation, repo workflows,
+  deployment, PAT/secrets, ops/runbooks, tax/VA claims docs, memoir preservation, NCAA ingestion engine, patent engine.
+- "archived" if it is outdated simulations, one-off device Q&A, XR/MetaQuest, generic Kali/bash escalation,
+  political posting content, or clearly historical/moot.
 
-def classify_with_ai(text: str) -> Dict[str, Any]:
-    """
-    Return a dict like:
-    {
-      "classification": "archived" or "active",
-      "tags": ["ncaaf", "simulation", "historical"],
-      "summary": "Short 1–2 sentence description"
-    }
-    """
-    if openai is None:
-        raise RuntimeError("openai library not installed")
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set")
-
-    openai.api_key = api_key
-
-    prompt = f"""
-You are the StegArchive AI Entity. You receive raw conversation text and must decide:
-
-1. classification: "active" if it relates to current StegVerse infra, SCW v4,
-   StegCore, tax claims, NCAA ingestion engine, patent engine, or memoirs.
-   "archived" if it is outdated simulations, political posts, random device Q&A, or clearly historical.
-
-2. tags: a few short keywords (lowercase, no spaces, use dashes).
-
-3. summary: 1–2 sentences summarizing the conversation.
-
-Return ONLY valid JSON with keys: classification, tags, summary.
-
-Conversation:
-{text}
+Return STRICT JSON only with:
+{
+  "classification": "active" | "archived",
+  "tags": ["tag1","tag2",...],   # lowercase, dashes ok, max 8
+  "summary": "1-2 sentences",
+  "confidence": 0.0-1.0
+}
+No extra keys. No markdown.
 """
 
-    # Use a generic chat completion call; the exact model name is a placeholder
-    response = openai.ChatCompletion.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "You are a classification assistant for StegArchive."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
+def _safe_json_loads(s: str) -> Dict[str, Any]:
+    s = (s or "").strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        start = s.find("{")
+        end = s.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(s[start:end + 1])
+        raise
+
+def classify_text(text: str) -> Dict[str, Any]:
+    # OpenAI SDK reads OPENAI_API_KEY from environment automatically
+    client = OpenAI()
+
+    resp = client.responses.create(
+        model=DEFAULT_MODEL,
+        instructions=SYSTEM,
+        input=(text or "")[:120_000],  # guardrail for huge dumps
     )
 
-    import json
-    content = response.choices[0].message["content"]
-    data = json.loads(content)
-    return data
+    data = _safe_json_loads(resp.output_text)
+
+    cls = data.get("classification")
+    if cls not in ("active", "archived"):
+        cls = "active"
+
+    tags = data.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    tags = [str(t).strip().lower().replace(" ", "-") for t in tags if str(t).strip()]
+    tags = tags[:8]
+
+    summary = str(data.get("summary") or "").strip()
+    if not summary:
+        summary = "No summary provided."
+
+    try:
+        conf = float(data.get("confidence", 0.5))
+    except Exception:
+        conf = 0.5
+    conf = max(0.0, min(1.0, conf))
+
+    return {"classification": cls, "tags": tags, "summary": summary, "confidence": conf}
