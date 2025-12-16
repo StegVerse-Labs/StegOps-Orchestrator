@@ -1,0 +1,9 @@
+README.md
+README_GMAIL.md
+docs/RUNBOOK.md
+docs/ONBOARDING_CHECKLIST.md
+docs/REVENUE_PLAN_30D.md
+docs/GMAIL_FULL_SETUP.md
+script/archive_classifier.py
+script/archive_ai_entity.py
+.github/workflows/archive-manager.yml
