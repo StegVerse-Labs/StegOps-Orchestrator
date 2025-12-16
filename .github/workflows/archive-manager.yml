@@ -35,8 +35,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           STEGARCHIVE_MODEL: gpt-5.2
         run: |
-          python scripts/archive_classifier.py
-
+          python script/archive_classifier.py
+          
       - name: Commit & push (if changes)
         run: |
           if [ -n "$(git status --porcelain)" ]; then
