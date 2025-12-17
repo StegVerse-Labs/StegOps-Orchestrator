@@ -1,0 +1,155 @@
+name: StegOps Reopen on YES
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: write
+
+jobs:
+  reopen-and-qualify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Gate: only on closed StegOps issues + YES
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = (context.payload.comment?.body || "").trim().toLowerCase();
+            const yes = /^(yes|y|yep|yeah|sure|ok|okay|let’s do it|lets do it)\b/.test(comment);
+
+            const issue = context.payload.issue;
+            if (!issue) {
+              core.setOutput("proceed", "false");
+              return;
+            }
+
+            const labels = (issue.labels || []).map(l => l.name);
+            const hasStegOps = labels.includes("stegops");
+            const isClosed = (issue.state === "closed");
+            const alreadyQualified = labels.includes("qualified");
+            const alreadyLogged = labels.includes("lead-logged");
+
+            core.setOutput("proceed", String(yes && hasStegOps && isClosed));
+            core.setOutput("alreadyQualified", String(alreadyQualified));
+            core.setOutput("alreadyLogged", String(alreadyLogged));
+
+      - name: Stop if not applicable
+        if: steps.gate.outputs.proceed != 'true'
+        run: echo "Not a closed StegOps YES event. Exiting."
+
+      - name: Ensure labels exist
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                } else {
+                  throw e;
+                }
+              }
+            }
+
+            await ensureLabel("qualified", "0e8a16", "Lead replied YES; ready for scope/pricing confirmation.");
+            await ensureLabel("lead-logged", "5319e7", "Lead entry has been recorded in LEADS.md.");
+            await ensureLabel("no-response", "fbca04", "Auto-closed due to no response after follow-up.");
+            await ensureLabel("stegops", "1d76db", "StegOps inbound / service request.");
+
+      - name: Reopen issue
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: "open"
+            });
+
+      - name: Add qualified label (if missing)
+        if: steps.gate.outputs.proceed == 'true' && steps.gate.outputs.alreadyQualified != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["qualified"]
+            });
+
+      - name: Checkout repo (for LEADS.md + template)
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Append to LEADS.md (if not already logged)
+        if: steps.gate.outputs.proceed == 'true' && steps.gate.outputs.alreadyLogged != 'true'
+        run: |
+          ts="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          issue_url="${{ github.event.issue.html_url }}"
+          title="${{ github.event.issue.title }}"
+          author="${{ github.event.issue.user.login }}"
+
+          if [ ! -f LEADS.md ]; then
+            cat > LEADS.md << 'EOF'
+          # StegOps Leads
+
+          This file is automatically updated when inbound requests are detected that indicate potential revenue-generating work.
+
+          ## Leads
+          EOF
+          fi
+
+          echo "- \`$ts\` | source=issue | author=@$author | [$title]($issue_url) | status=reopened-qualified" >> LEADS.md
+
+      - name: Commit LEADS.md (if changed)
+        if: steps.gate.outputs.proceed == 'true' && steps.gate.outputs.alreadyLogged != 'true'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "steg-ops-orchestrator-bot"
+            git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
+            git add LEADS.md
+            git commit -m "Leads: reopen+qualify issue #${{ github.event.issue.number }}"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Mark lead logged (label)
+        if: steps.gate.outputs.proceed == 'true' && steps.gate.outputs.alreadyLogged != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["lead-logged"]
+            });
+
+      - name: Post reopened next-steps comment
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("templates/lead_reopened_reply.md", "utf8");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
