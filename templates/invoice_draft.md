@@ -11,20 +11,19 @@
 ## Selected Service
 {{SERVICE_NAME}}
 
-## Scope Notes (from issue)
-{{SCOPE_SNIPPET}}
+## Pricing
+**Amount:** {{AMOUNT_USD}}
 
 ---
 
-## Pricing
-**Amount (USD):** {{AMOUNT_USD}}  
-**Terms:** Due upon acceptance of scope.
+## Notes
+{{NOTES}}
 
 ---
 
 ## Next Step
 Reply on the issue with:
-- ✅ “ACCEPT” to confirm scope and pricing
-- any required billing details (optional)
+- ✅ **ACCEPT** to confirm scope and pricing
+- or comment with changes
 
-*This draft is generated automatically and does not constitute a final invoice until confirmed.*
+*This draft is generated automatically and is not final until accepted.*
