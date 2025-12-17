@@ -1,5 +1,9 @@
 {
-  "last_run_utc": null,
+  "last_run_counts": {
+    "active": 0,
+    "archived": 0,
+    "processed": 0
+  },
   "last_run_summary": "",
-  "last_run_counts": { "processed": 0, "archived": 0, "active": 0 }
+  "last_run_utc": 1765940845
 }
