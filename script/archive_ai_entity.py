@@ -4,7 +4,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from scripts.archive_ai_entity import classify_text
+from script.archive_ai_entity import classify_text
 
 REPO = Path(__file__).resolve().parents[1]
 
