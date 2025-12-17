@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Gate: qualified issue + comment contains "invoice"
+      - name: Gate + Determine pricing (from comment first, fallback to issue body)
         id: gate
         uses: actions/github-script@v7
         with:
@@ -21,54 +21,83 @@ jobs:
             const issue = context.payload.issue;
             if (!issue) { core.setOutput("proceed", "false"); return; }
 
-            const comment = (context.payload.comment?.body || "").toLowerCase();
-            const wantsInvoice = /\binvoice\b/.test(comment);
+            const commentRaw = (context.payload.comment?.body || "").trim();
+            const comment = commentRaw.toLowerCase();
 
+            const wantsInvoice = /\binvoice\b/.test(comment);
             const labels = (issue.labels || []).map(l => l.name);
             const qualified = labels.includes("qualified");
             const stegops = labels.includes("stegops");
 
-            core.setOutput("proceed", String(wantsInvoice && qualified && stegops));
+            if (!(wantsInvoice && qualified && stegops)) {
+              core.setOutput("proceed", "false");
+              return;
+            }
+
+            // 1) Prefer explicit comment intent
+            let service = null; // "monthly" | "audit"
+            if (/\bmonthly\b/.test(comment)) service = "monthly";
+            if (/\baudit\b/.test(comment)) service = "audit";
+
+            // Optional explicit amount in comment: "amount 3500" or "amount: 3500"
+            let amountOverride = null;
+            const m = comment.match(/\bamount\b\s*[:=]?\s*\$?\s*([0-9]{2,6})\b/);
+            if (m) amountOverride = parseInt(m[1], 10);
+
+            // 2) Fallback to issue body (from issue template dropdown)
+            if (!service) {
+              const body = (issue.body || "").toLowerCase();
+              if (body.includes("monthly ops support")) service = "monthly";
+              if (body.includes("one-time ai ops audit")) service = "audit";
+            }
+
+            // Default if still unknown
+            if (!service) service = "audit";
+
+            // Compute service display + pricing
+            let serviceName = "";
+            let amount = "";
+
+            if (service === "monthly") {
+              serviceName = "Monthly Ops Support";
+              amount = amountOverride ? `$${amountOverride} USD / month` : "$99 / month";
+            } else {
+              serviceName = "One-time AI Ops Audit";
+              // Default audit midpoint; override allowed
+              amount = amountOverride ? `$${amountOverride} USD` : "$2,500 USD (within $1,500–$5,000 range)";
+            }
+
+            core.setOutput("proceed", "true");
+            core.setOutput("service_name", serviceName);
+            core.setOutput("amount_usd", amount);
+            core.setOutput("notes", amountOverride ? "Amount set from comment override." : "Amount set from template selection/default.");
 
       - name: Stop if not applicable
         if: steps.gate.outputs.proceed != 'true'
-        run: echo "Not an invoice event. Exiting."
+        run: echo "Not an invoice event.. Exiting."
 
-      - name: Checkout (for templates + write invoice)
-        if: steps.gate.outputs.proceed == 'true'
+      - name: Checkout (templates + write invoice)
         uses: actions/checkout@v4
 
       - name: Generate draft invoice file
-        if: steps.gate.outputs.proceed == 'true'
         run: |
           set -euo pipefail
-
           mkdir -p invoices
 
           ISSUE_NUMBER="${{ github.event.issue.number }}"
           AUTHOR="${{ github.event.issue.user.login }}"
           ISSUE_URL="${{ github.event.issue.html_url }}"
           ISSUE_TITLE="${{ github.event.issue.title }}"
-
           DATE_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           DATE_TAG="$(date -u '+%Y%m%d')"
           INVOICE_ID="INV-${ISSUE_NUMBER}-${DATE_TAG}"
 
-          # Very simple service inference from issue title (safe default)
-          SERVICE_NAME="StegOps Services (TBD)"
-          AMOUNT_USD="$2,500 (DRAFT)"
-
-          # Grab up to first ~20 lines of issue body as scope snippet (if present)
-          # Note: GitHub event payload may not include full body here; we keep this safe.
-          SCOPE_SNIPPET="(Scope details to be confirmed in issue thread.)"
+          SERVICE_NAME="${{ steps.gate.outputs.service_name }}"
+          AMOUNT_USD="${{ steps.gate.outputs.amount_usd }}"
+          NOTES="${{ steps.gate.outputs.notes }}"
 
           TEMPLATE="templates/invoice_draft.md"
           OUT="invoices/${INVOICE_ID}.md"
-
-          if [ ! -f "$TEMPLATE" ]; then
-            echo "Missing $TEMPLATE"
-            exit 1
-          fi
 
           sed \
             -e "s|{{INVOICE_ID}}|${INVOICE_ID}|g" \
@@ -77,14 +106,13 @@ jobs:
             -e "s|{{ISSUE_URL}}|${ISSUE_URL}|g" \
             -e "s|{{ISSUE_TITLE}}|${ISSUE_TITLE}|g" \
             -e "s|{{SERVICE_NAME}}|${SERVICE_NAME}|g" \
-            -e "s|{{SCOPE_SNIPPET}}|${SCOPE_SNIPPET}|g" \
             -e "s|{{AMOUNT_USD}}|${AMOUNT_USD}|g" \
+            -e "s|{{NOTES}}|${NOTES}|g" \
             "$TEMPLATE" > "$OUT"
 
           echo "Wrote $OUT"
 
       - name: Commit invoice (if changed)
-        if: steps.gate.outputs.proceed == 'true'
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "steg-ops-orchestrator-bot"
@@ -97,12 +125,10 @@ jobs:
           fi
 
       - name: Comment with invoice link
-        if: steps.gate.outputs.proceed == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const issue = context.payload.issue;
-            const n = issue.number;
+            const n = context.issue.number;
             const dateTag = new Date().toISOString().slice(0,10).replaceAll('-','');
             const invoiceId = `INV-${n}-${dateTag}`;
             const path = `invoices/${invoiceId}.md`;
@@ -112,5 +138,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: n,
-              body: `🧾 Draft invoice created: ${url}\n\nReply **ACCEPT** if you want to confirm scope/pricing.`
+              body: `🧾 Draft invoice created: ${url}\n\nReply **ACCEPT** to confirm scope/pricing, or comment “invoice amount 3500” to override.`
             });
