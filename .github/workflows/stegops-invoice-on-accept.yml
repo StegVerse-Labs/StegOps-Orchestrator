@@ -1,0 +1,147 @@
+name: StegOps Invoice on ACCEPT
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  invoice-on-accept:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Gate: ACCEPT on StegOps + qualified + sow-generated + not already invoiced
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            if (!issue) { core.setOutput("proceed", "false"); return; }
+
+            const comment = (context.payload.comment?.body || "").trim().toLowerCase();
+            const accept = /^(accept|accepted|i accept)\b/.test(comment);
+
+            const labels = (issue.labels || []).map(l => l.name);
+            const stegops = labels.includes("stegops");
+            const qualified = labels.includes("qualified");
+            const sowGenerated = labels.includes("sow-generated");
+            const invoiceGenerated = labels.includes("invoice-generated");
+
+            core.setOutput("proceed", String(accept && stegops && qualified && sowGenerated && !invoiceGenerated));
+
+      - name: Stop if not applicable
+        if: steps.gate.outputs.proceed != 'true'
+        run: echo "Not an ACCEPT invoice event."
+
+      - name: Ensure label exists
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                } else {
+                  throw e;
+                }
+              }
+            }
+
+            await ensureLabel("invoice-generated", "0052cc", "Invoice has been generated for this engagement.");
+
+      - name: Checkout repo
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Generate invoice file
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+
+          mkdir -p invoices
+
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          AUTHOR="${{ github.event.issue.user.login }}"
+          ISSUE_URL="${{ github.event.issue.html_url }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+
+          DATE_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          DATE_TAG="$(date -u '+%Y%m%d')"
+          INVOICE_ID="INV-${ISSUE_NUMBER}-${DATE_TAG}-FINAL"
+
+          SOW_PATH="leads/issue-${ISSUE_NUMBER}/SOW_DRAFT.md"
+
+          # Default amount (safe). You can refine later via tags/scope extraction.
+          AMOUNT_USD="$2,500 USD"
+
+          TEMPLATE="templates/invoice_final.md"
+          OUT="invoices/${INVOICE_ID}.md"
+
+          if [ ! -f "$TEMPLATE" ]; then
+            echo "Missing $TEMPLATE"
+            exit 1
+          fi
+
+          sed \
+            -e "s|{{INVOICE_ID}}|${INVOICE_ID}|g" \
+            -e "s|{{DATE_UTC}}|${DATE_UTC}|g" \
+            -e "s|{{AUTHOR}}|${AUTHOR}|g" \
+            -e "s|{{ISSUE_URL}}|${ISSUE_URL}|g" \
+            -e "s|{{ISSUE_TITLE}}|${ISSUE_TITLE}|g" \
+            -e "s|{{SOW_PATH}}|${SOW_PATH}|g" \
+            -e "s|{{AMOUNT_USD}}|${AMOUNT_USD}|g" \
+            "$TEMPLATE" > "$OUT"
+
+          echo "Wrote $OUT"
+
+      - name: Commit invoice
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "steg-ops-orchestrator-bot"
+            git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
+            git add invoices/
+            git commit -m "Invoices: generate final invoice for issue #${{ github.event.issue.number }}"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Label invoice-generated
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["invoice-generated"]
+            });
+
+      - name: Comment invoice link
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const n = context.issue.number;
+            const dateTag = new Date().toISOString().slice(0,10).replaceAll('-','');
+            const invoiceId = `INV-${n}-${dateTag}-FINAL`;
+            const path = `invoices/${invoiceId}.md`;
+            const url = `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/${path}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: n,
+              body: `✅ **Invoice generated**: ${url}\n\nReply **PAID** once payment is completed, or request a payment link/method.`
+            });
