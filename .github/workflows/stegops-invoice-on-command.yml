@@ -1,0 +1,116 @@
+name: StegOps Invoice Draft on Command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: write
+
+jobs:
+  invoice:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Gate: qualified issue + comment contains "invoice"
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            if (!issue) { core.setOutput("proceed", "false"); return; }
+
+            const comment = (context.payload.comment?.body || "").toLowerCase();
+            const wantsInvoice = /\binvoice\b/.test(comment);
+
+            const labels = (issue.labels || []).map(l => l.name);
+            const qualified = labels.includes("qualified");
+            const stegops = labels.includes("stegops");
+
+            core.setOutput("proceed", String(wantsInvoice && qualified && stegops));
+
+      - name: Stop if not applicable
+        if: steps.gate.outputs.proceed != 'true'
+        run: echo "Not an invoice event. Exiting."
+
+      - name: Checkout (for templates + write invoice)
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Generate draft invoice file
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+
+          mkdir -p invoices
+
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          AUTHOR="${{ github.event.issue.user.login }}"
+          ISSUE_URL="${{ github.event.issue.html_url }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+
+          DATE_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          DATE_TAG="$(date -u '+%Y%m%d')"
+          INVOICE_ID="INV-${ISSUE_NUMBER}-${DATE_TAG}"
+
+          # Very simple service inference from issue title (safe default)
+          SERVICE_NAME="StegOps Services (TBD)"
+          AMOUNT_USD="$2,500 (DRAFT)"
+
+          # Grab up to first ~20 lines of issue body as scope snippet (if present)
+          # Note: GitHub event payload may not include full body here; we keep this safe.
+          SCOPE_SNIPPET="(Scope details to be confirmed in issue thread.)"
+
+          TEMPLATE="templates/invoice_draft.md"
+          OUT="invoices/${INVOICE_ID}.md"
+
+          if [ ! -f "$TEMPLATE" ]; then
+            echo "Missing $TEMPLATE"
+            exit 1
+          fi
+
+          sed \
+            -e "s|{{INVOICE_ID}}|${INVOICE_ID}|g" \
+            -e "s|{{DATE_UTC}}|${DATE_UTC}|g" \
+            -e "s|{{AUTHOR}}|${AUTHOR}|g" \
+            -e "s|{{ISSUE_URL}}|${ISSUE_URL}|g" \
+            -e "s|{{ISSUE_TITLE}}|${ISSUE_TITLE}|g" \
+            -e "s|{{SERVICE_NAME}}|${SERVICE_NAME}|g" \
+            -e "s|{{SCOPE_SNIPPET}}|${SCOPE_SNIPPET}|g" \
+            -e "s|{{AMOUNT_USD}}|${AMOUNT_USD}|g" \
+            "$TEMPLATE" > "$OUT"
+
+          echo "Wrote $OUT"
+
+      - name: Commit invoice (if changed)
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "steg-ops-orchestrator-bot"
+            git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
+            git add invoices/
+            git commit -m "Invoices: draft invoice for issue #${{ github.event.issue.number }}"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Comment with invoice link
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const n = issue.number;
+            const dateTag = new Date().toISOString().slice(0,10).replaceAll('-','');
+            const invoiceId = `INV-${n}-${dateTag}`;
+            const path = `invoices/${invoiceId}.md`;
+            const url = `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/${path}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: n,
+              body: `🧾 Draft invoice created: ${url}\n\nReply **ACCEPT** if you want to confirm scope/pricing.`
+            });
