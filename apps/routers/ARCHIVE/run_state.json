@@ -1,9 +1,5 @@
 {
-  "last_run_counts": {
-    "active": 0,
-    "archived": 1,
-    "processed": 1
-  },
-  "last_run_summary": "Conversation covered Meta Quest 3 usage in a truck, a generic bash privilege escalation technique, and emoji payload differences across iPhone and Android, none of which advance current StegVerse work. (tags: meta-quest,xr-headset,bash,privilege-escalation)",
-  "last_run_utc": 1765938946
+  "last_run_utc": null,
+  "last_run_summary": "",
+  "last_run_counts": { "processed": 0, "archived": 0, "active": 0 }
 }
