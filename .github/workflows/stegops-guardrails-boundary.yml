@@ -1,0 +1,104 @@
+name: Guardrails – Boundary Enforcement
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  boundary-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history for diffs)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine diff range
+        id: range
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
+            echo "head=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
+          else
+            # push event
+            echo "base=${{ github.event.before }}" >> $GITHUB_OUTPUT
+            echo "head=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: List changed files
+        id: changes
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.range.outputs.base }}"
+          HEAD="${{ steps.range.outputs.head }}"
+
+          # Handle edge cases where BASE can be all zeros (first push)
+          if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            git diff --name-only "$HEAD~1" "$HEAD" > changed_files.txt || true
+          else
+            git diff --name-only "$BASE" "$HEAD" > changed_files.txt || true
+          fi
+
+          echo "Changed files:"
+          cat changed_files.txt || true
+
+      - name: Enforce boundary rules
+        run: |
+          set -euo pipefail
+
+          FAIL=0
+
+          echo ""
+          echo "Boundary rules (Orchestrator must NOT contain deliverables):"
+          echo "- Block any REPORT.md under leads/"
+          echo "- Block any ARTIFACTS/ under leads/"
+          echo "- Block any clients/ folder (belongs in StegOps-Deliverables private repo)"
+          echo "- Block common sensitive file types if placed under leads/"
+          echo ""
+
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+
+            # 1) Never allow clients/ in orchestrator
+            if echo "$f" | grep -Eq '^clients/'; then
+              echo "::error file=$f::Forbidden path: clients/ belongs in StegOps-Deliverables (private)."
+              FAIL=1
+            fi
+
+            # 2) Never allow deliverables report/artifacts in leads/
+            if echo "$f" | grep -Eq '^leads/issue-[0-9]+/REPORT\.md$'; then
+              echo "::error file=$f::Forbidden: REPORT.md must live in StegOps-Deliverables, not Orchestrator."
+              FAIL=1
+            fi
+
+            if echo "$f" | grep -Eq '^leads/issue-[0-9]+/ARTIFACTS/'; then
+              echo "::error file=$f::Forbidden: ARTIFACTS/ must live in StegOps-Deliverables, not Orchestrator."
+              FAIL=1
+            fi
+
+            # 3) Prevent accidental sensitive uploads under leads/ (screenshots/log dumps)
+            if echo "$f" | grep -Eq '^leads/issue-[0-9]+/.*\.(png|jpg|jpeg|webp|gif|pdf|zip|7z|tar|gz|log)$'; then
+              echo "::error file=$f::Forbidden: binary/log artifacts under leads/ are not allowed in Orchestrator."
+              FAIL=1
+            fi
+
+          done < changed_files.txt
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "❌ Boundary enforcement failed."
+            echo "Move deliverables into the private repo: StegVerse-Labs/StegOps-Deliverables"
+            echo "Suggested structure there:"
+            echo "  clients/issue-<n>/{REPORT.md,ARTIFACTS/,STATUS.md,STATE.json}"
+            exit 1
+          fi
+
+          echo "✅ Boundary enforcement passed."
