@@ -6,4 +6,5 @@ docs/REVENUE_PLAN_30D.md
 docs/GMAIL_FULL_SETUP.md
 script/archive_classifier.py
 script/archive_ai_entity.py
+script/archive_status.py
 .github/workflows/archive-manager.yml
