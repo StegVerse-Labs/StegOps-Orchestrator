@@ -5,7 +5,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Ensure repo root is on sys.path for CI + direct execution
+# Ensure repo root is importable
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
@@ -24,6 +24,8 @@ WATCHLIST = REPO / "apps" / "routers" / "ARCHIVE" / "watchlist.txt"
 STATUS_MD = REPO / "apps" / "routers" / "ARCHIVE" / "STATUS.md"
 STATE_JSON = REPO / "apps" / "routers" / "ARCHIVE" / "run_state.json"
 
+LEADS_MD = REPO / "LEADS.md"
+
 def get_index_path() -> Path:
     if INDEX_PRIMARY.exists() or INDEX_PRIMARY.parent.exists():
         return INDEX_PRIMARY
@@ -37,9 +39,12 @@ def ensure_dirs(index_path: Path):
     WATCHLIST.parent.mkdir(parents=True, exist_ok=True)
 
     if not index_path.exists():
-        index_path.write_text("# StegVerse Combined Archive List\n\n## Auto-log\n", encoding="utf-8")
+        index_path.write_text(
+            "# StegVerse Combined Archive List\n\n## Auto-log\n",
+            encoding="utf-8"
+        )
 
-def append_log(index_path: Path, result: dict, dest_rel: str):
+def append_archive_log(index_path: Path, result: dict, dest_rel: str):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     line = (
         f"- `{ts}` — `{dest_rel}` → **{result['classification'].upper()}** "
@@ -47,6 +52,19 @@ def append_log(index_path: Path, result: dict, dest_rel: str):
     )
     with index_path.open("a", encoding="utf-8") as f:
         f.write(line)
+
+def append_lead(source: str, summary: str):
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    entry = f"- `{ts}` | {source} | {summary} | status=new\n"
+
+    if not LEADS_MD.exists():
+        LEADS_MD.write_text(
+            "# StegOps Leads\n\n## Leads\n",
+            encoding="utf-8"
+        )
+
+    with LEADS_MD.open("a", encoding="utf-8") as f:
+        f.write(entry)
 
 def main():
     if not os.getenv("OPENAI_API_KEY"):
@@ -58,12 +76,10 @@ def main():
 
     files = sorted(INBOX.glob("*.md"))
     counts = {"processed": 0, "archived": 0, "active": 0}
-    summary_lines: list[str] = []
+    summary_lines = []
 
     if not files:
-        print("No .md files in inbox/. Nothing to do.")
         write_status_md(REPO, STATUS_MD, WATCHLIST, STATE_JSON, this_run_epoch, counts, summary_lines)
-        print(f"Wrote status: {STATUS_MD}")
         return
 
     for path in files:
@@ -71,6 +87,7 @@ def main():
         result = classify_text(text)
 
         counts["processed"] += 1
+
         if result["classification"] == "archived":
             counts["archived"] += 1
             dest = ARCHIVED_DIR / path.name
@@ -81,19 +98,17 @@ def main():
         shutil.move(str(path), str(dest))
         dest_rel = f"processed/{result['classification']}/{dest.name}"
 
-        tags = ",".join(result.get("tags", [])[:4])
-        sline = (result.get("summary") or "").strip()
-        if tags and sline:
-            sline = f"{sline} (tags: {tags})"
-        if sline:
-            summary_lines.append(sline)
+        # Lead capture
+        if "lead" in result.get("tags", []):
+            append_lead(f"inbox/{path.name}", result["summary"])
 
-        print(f"{path.name} => {result['classification']} tags={result['tags']} conf={result['confidence']:.2f}")
+        # Build run summary
+        if result["summary"]:
+            summary_lines.append(result["summary"])
 
-        append_log(index_path, result, dest_rel)
+        append_archive_log(index_path, result, dest_rel)
 
     write_status_md(REPO, STATUS_MD, WATCHLIST, STATE_JSON, this_run_epoch, counts, summary_lines)
-    print(f"Wrote status: {STATUS_MD}")
 
 if __name__ == "__main__":
     main()
