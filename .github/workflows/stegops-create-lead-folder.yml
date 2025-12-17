@@ -1,0 +1,92 @@
+name: StegOps Create Lead Folder
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  folder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Gate: only when label == qualified AND stegops issue
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = context.payload.label?.name || "";
+            const issue = context.payload.issue;
+            const labels = (issue.labels || []).map(l => l.name);
+
+            const proceed = (label === "qualified") && labels.includes("stegops");
+            core.setOutput("proceed", String(proceed));
+
+      - name: Stop if not applicable
+        if: steps.gate.outputs.proceed != 'true'
+        run: echo "Not a qualified StegOps labeling event."
+
+      - name: Checkout
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Create lead folder + metadata
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          AUTHOR="${{ github.event.issue.user.login }}"
+          ISSUE_URL="${{ github.event.issue.html_url }}"
+          DATE_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          DIR="leads/issue-${ISSUE_NUMBER}"
+          mkdir -p "$DIR"
+
+          # README from template
+          TEMPLATE="templates/lead_folder_README.md"
+          OUT="$DIR/README.md"
+          sed \
+            -e "s|{{ISSUE_URL}}|${ISSUE_URL}|g" \
+            -e "s|{{AUTHOR}}|${AUTHOR}|g" \
+            -e "s|{{DATE_UTC}}|${DATE_UTC}|g" \
+            "$TEMPLATE" > "$OUT"
+
+          # Metadata
+          cat > "$DIR/metadata.json" << EOF
+          {
+            "issue_number": ${ISSUE_NUMBER},
+            "issue_url": "${ISSUE_URL}",
+            "author": "${AUTHOR}",
+            "created_utc": "${DATE_UTC}",
+            "status": "qualified"
+          }
+          EOF
+
+          # Seed checklist
+          cat > "$DIR/checklist.md" << 'EOF'
+          # Deliverables Checklist
+
+          - [ ] Confirm repo link(s)
+          - [ ] Confirm audit vs monthly
+          - [ ] Confirm constraints (deadline/security/output format)
+          - [ ] Produce STATUS.md snapshot
+          - [ ] Produce findings + recommendations
+          - [ ] Produce next steps + estimate
+          EOF
+
+      - name: Commit lead folder
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "steg-ops-orchestrator-bot"
+            git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
+            git add leads/
+            git commit -m "Leads: create workspace for issue #${{ github.event.issue.number }}"
+            git push
+          else
+            echo "No changes to commit."
+          fi
