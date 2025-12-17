@@ -9,7 +9,7 @@
 ---
 
 ## Service
-StegOps — Trust & Risk Systems Audit
+{{SERVICE_NAME}}
 
 ## Scope Reference
 Draft SOW: `{{SOW_PATH}}`
