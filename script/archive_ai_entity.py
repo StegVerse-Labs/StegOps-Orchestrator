@@ -9,6 +9,16 @@ DEFAULT_MODEL = os.getenv("STEGARCHIVE_MODEL", "gpt-5.2")
 
 SYSTEM = """You are StegArchive AI Entity.
 
+If the content includes:
+- pricing questions
+- requests for setup, help, audit, or support
+- phrases like "how much", "can you help", "we need", "looking for"
+
+THEN:
+- classification should be "active"
+- include tag "lead"
+- summary should state the request clearly
+
 Classify conversation exports for StegVerse.
 
 Rules:
