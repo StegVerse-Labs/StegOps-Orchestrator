@@ -1,0 +1,82 @@
+name: StegOps Auto Close Stale Leads
+
+on:
+  schedule:
+    - cron: "17 9 * * *"  # daily @ 09:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+
+jobs:
+  autoclose:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (for templates)
+        uses: actions/checkout@v4
+
+      - name: Auto-close stale StegOps issues (7+ days)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("templates/lead_autoclose.md", "utf8");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Ensure label exists
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                } else {
+                  throw e;
+                }
+              }
+            }
+
+            await ensureLabel("no-response", "fbca04", "Auto-closed due to no response after follow-up.");
+            await ensureLabel("do-not-close", "d93f0b", "Prevent auto-close on this issue.");
+
+            // Search open StegOps issues (GitHub search syntax)
+            const q = `repo:${owner}/${repo} is:issue is:open label:stegops -label:qualified -label:do-not-close`;
+            const res = await github.rest.search.issuesAndPullRequests({ q, per_page: 100 });
+
+            const now = Date.now();
+            const MS_7_DAYS = 7 * 24 * 60 * 60 * 1000;
+
+            for (const item of res.data.items) {
+              const issue_number = item.number;
+
+              // last updated timestamp
+              const updated = new Date(item.updated_at).getTime();
+              const age = now - updated;
+
+              if (age < MS_7_DAYS) continue;
+
+              // Post a final check-in comment
+              await github.rest.issues.createComment({
+                owner, repo,
+                issue_number,
+                body
+              });
+
+              // Label no-response
+              await github.rest.issues.addLabels({
+                owner, repo,
+                issue_number,
+                labels: ["no-response"]
+              });
+
+              // Close issue
+              await github.rest.issues.update({
+                owner, repo,
+                issue_number,
+                state: "closed"
+              });
+
+              console.log(`Closed issue #${issue_number} for inactivity.`);
