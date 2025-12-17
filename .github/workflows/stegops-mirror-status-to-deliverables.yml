@@ -1,0 +1,147 @@
+name: StegOps Mirror Status to Deliverables
+
+on:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "leads/**/STATUS.md"
+      - "leads/**/state.json"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stegops-mirror-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Gate: require deliverables secrets
+        id: gate
+        run: |
+          if [ -z "${{ secrets.DELIVERABLES_REPO }}" ] || [ -z "${{ secrets.DELIVERABLES_TOKEN }}" ]; then
+            echo "Missing DELIVERABLES_REPO or DELIVERABLES_TOKEN secrets."
+            echo "proceed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "proceed=true" >> $GITHUB_OUTPUT
+
+      - name: Stop if secrets missing
+        if: steps.gate.outputs.proceed != 'true'
+        run: echo "Skipping mirror because deliverables secrets are not configured."
+
+      - name: Checkout orchestrator (full history for diff)
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine changed issue directories
+        if: steps.gate.outputs.proceed == 'true'
+        id: issues
+        run: |
+          set -euo pipefail
+
+          BASE="${{ github.event.before }}"
+          HEAD="${{ github.sha }}"
+
+          # Handle first push edge case
+          if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="$(git rev-parse "${HEAD}~1" 2>/dev/null || echo "")"
+          fi
+
+          if [ -z "$BASE" ]; then
+            echo "No valid BASE SHA; cannot diff safely."
+            echo "issue_numbers=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git diff --name-only "$BASE" "$HEAD" > changed_files.txt || true
+
+          # Find issue numbers where state/status changed
+          ISSUE_NUMS="$(cat changed_files.txt \
+            | grep -E '^leads/issue-[0-9]+/(STATUS\.md|state\.json)$' \
+            | sed -E 's|^leads/issue-([0-9]+)/.*$|\1|' \
+            | sort -u \
+            | tr '\n' ' ')"
+
+          echo "Detected issue numbers: $ISSUE_NUMS"
+          echo "issue_numbers=$ISSUE_NUMS" >> $GITHUB_OUTPUT
+
+      - name: Stop if nothing to mirror
+        if: steps.gate.outputs.proceed == 'true' && steps.issues.outputs.issue_numbers == ''
+        run: echo "No issue STATUS/state changes detected; nothing to mirror."
+
+      - name: Clone private deliverables repo
+        if: steps.gate.outputs.proceed == 'true' && steps.issues.outputs.issue_numbers != ''
+        env:
+          DELIVERABLES_REPO: ${{ secrets.DELIVERABLES_REPO }}
+          DELIVERABLES_TOKEN: ${{ secrets.DELIVERABLES_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "steg-ops-orchestrator-bot"
+          git config --global user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
+
+          rm -rf /tmp/deliverables
+          git clone "https://x-access-token:${DELIVERABLES_TOKEN}@github.com/${DELIVERABLES_REPO}.git" /tmp/deliverables
+
+      - name: Mirror STATUS + STATE into private repo (only if private_workspace exists)
+        if: steps.gate.outputs.proceed == 'true' && steps.issues.outputs.issue_numbers != ''
+        run: |
+          set -euo pipefail
+
+          for N in ${{ steps.issues.outputs.issue_numbers }}; do
+            SRC_DIR="leads/issue-${N}"
+            STATE_PATH="${SRC_DIR}/state.json"
+            STATUS_PATH="${SRC_DIR}/STATUS.md"
+
+            if [ ! -f "$STATE_PATH" ]; then
+              echo "Issue $N: missing $STATE_PATH; skipping."
+              continue
+            fi
+
+            # Only mirror after verification boundary is established (private_workspace present)
+            PRIVATE_WS="$(python - << 'PY'
+import json
+import sys
+p=sys.argv[1]
+d=json.load(open(p,'r',encoding='utf-8'))
+print(d.get("private_workspace") or "")
+PY
+"$STATE_PATH")"
+
+            if [ -z "$PRIVATE_WS" ]; then
+              echo "Issue $N: private_workspace not set yet (not verified/ready). Skipping mirror."
+              continue
+            fi
+
+            DEST_DIR="/tmp/deliverables/clients/issue-${N}"
+            mkdir -p "$DEST_DIR"
+
+            if [ -f "$STATUS_PATH" ]; then
+              cp "$STATUS_PATH" "$DEST_DIR/STATUS.md"
+            fi
+
+            # In private repo we store STATE.json (capitalized) by convention
+            cp "$STATE_PATH" "$DEST_DIR/STATE.json"
+
+            echo "Issue $N: mirrored STATUS + STATE to private repo."
+          done
+
+      - name: Commit and push (if changed)
+        if: steps.gate.outputs.proceed == 'true' && steps.issues.outputs.issue_numbers != ''
+        run: |
+          set -euo pipefail
+          cd /tmp/deliverables
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git add clients/
+            git commit -m "Mirror: update STATUS/STATE from orchestrator"
+            git push
+          else
+            echo "No changes to push."
+          fi
