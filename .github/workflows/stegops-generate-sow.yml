@@ -1,0 +1,150 @@
+name: StegOps Generate SOW Draft
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sow:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Gate: qualified StegOps issue + repo link present + no SOW yet
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            if (!issue) {
+              core.setOutput("proceed", "false");
+              return;
+            }
+
+            const comment = context.payload.comment?.body || "";
+            const hasRepoLink = /(https?:\/\/github\.com\/\S+)/i.test(comment);
+
+            const labels = (issue.labels || []).map(l => l.name);
+            const qualified = labels.includes("qualified");
+            const stegops = labels.includes("stegops");
+            const sowGenerated = labels.includes("sow-generated");
+
+            core.setOutput(
+              "proceed",
+              String(qualified && stegops && hasRepoLink && !sowGenerated)
+            );
+
+      - name: Stop if not applicable
+        if: steps.gate.outputs.proceed != 'true'
+        run: echo "Not eligible for SOW generation."
+
+      - name: Ensure label exists
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.issues.createLabel({
+                    owner,
+                    repo,
+                    name,
+                    color,
+                    description
+                  });
+                } else {
+                  throw e;
+                }
+              }
+            }
+
+            await ensureLabel(
+              "sow-generated",
+              "bfdadc",
+              "Draft SOW has been generated for this lead."
+            );
+
+      - name: Checkout repo
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Generate SOW draft
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          AUTHOR="${{ github.event.issue.user.login }}"
+          ISSUE_URL="${{ github.event.issue.html_url }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          DATE_UTC="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          LEAD_DIR="leads/issue-${ISSUE_NUMBER}"
+          mkdir -p "$LEAD_DIR"
+
+          TEMPLATE="templates/sow_draft.md"
+          OUT="$LEAD_DIR/SOW_DRAFT.md"
+
+          # Extract repo links from comment
+          REPOS=$(echo "${{ github.event.comment.body }}" | grep -Eo 'https?://github.com/[^ )]+' | sed 's/^/- /')
+
+          [ -z "$REPOS" ] && REPOS="- (To be confirmed)"
+
+          sed \
+            -e "s|{{AUTHOR}}|${AUTHOR}|g" \
+            -e "s|{{ISSUE_URL}}|${ISSUE_URL}|g" \
+            -e "s|{{ISSUE_TITLE}}|${ISSUE_TITLE}|g" \
+            -e "s|{{DATE_UTC}}|${DATE_UTC}|g" \
+            -e "s|{{REPO_LIST}}|${REPOS}|g" \
+            -e "s|{{TIMELINE}}|2–3 weeks|g" \
+            -e "s|{{FEE_RANGE}}|$1,500 – $5,000|g" \
+            "$TEMPLATE" > "$OUT"
+
+      - name: Commit SOW
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "steg-ops-orchestrator-bot"
+            git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
+            git add leads/
+            git commit -m "SOW: generate draft for issue #${{ github.event.issue.number }}"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Label issue as sow-generated
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["sow-generated"]
+            });
+
+      - name: Notify issue
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const url = `https://github.com/${context.repo.owner}/${context.repo.repo}/tree/main/leads/issue-${issue.number}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: `📄 **Draft SOW generated**\n\nYou can review it here:\n${url}\n\nReply **ACCEPT** to proceed or comment with requested changes.`
+            });
