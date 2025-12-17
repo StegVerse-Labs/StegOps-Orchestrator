@@ -1,0 +1,62 @@
+name: StegOps – Ops Help / Audit Request
+description: Request help, an audit, or automation setup from StegOps
+title: "[StegOps] Request: "
+labels: ["stegops", "inbound"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reaching out.
+
+        This issue is reviewed asynchronously by **StegOps**.
+        No meetings required.
+
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: What are you looking for?
+      options:
+        - Ops audit / review
+        - Automation help
+        - Documentation cleanup
+        - Ongoing ops support
+        - Pricing / services info
+        - Not sure yet
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Briefly describe your situation
+      description: Links to repos, docs, or context are helpful.
+      placeholder: |
+        Example:
+        - Repo(s): https://github.com/org/repo
+        - Pain points: docs are stale, decisions scattered
+        - What prompted this request?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: Timeline
+      options:
+        - No rush
+        - Soon (1–2 weeks)
+        - Urgent
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### What happens next
+        - Your request is reviewed asynchronously
+        - If it’s a fit, you’ll receive pricing and next steps
+        - If not, you’ll still get a clear answer
+
+        Thanks for using StegOps.
