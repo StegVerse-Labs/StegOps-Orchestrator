@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Gate: only on closed StegOps issues + YES
+      - name: Gate: only on closed StegOps issues + YES (and not already next-steps sent)
         id: gate
         uses: actions/github-script@v7
         with:
@@ -32,14 +32,16 @@ jobs:
             const isClosed = (issue.state === "closed");
             const alreadyQualified = labels.includes("qualified");
             const alreadyLogged = labels.includes("lead-logged");
+            const nextStepsSent = labels.includes("next-steps-sent");
 
-            core.setOutput("proceed", String(yes && hasStegOps && isClosed));
+            core.setOutput("proceed", String(yes && hasStegOps && isClosed && !nextStepsSent));
             core.setOutput("alreadyQualified", String(alreadyQualified));
             core.setOutput("alreadyLogged", String(alreadyLogged));
+            core.setOutput("nextStepsSent", String(nextStepsSent));
 
       - name: Stop if not applicable
         if: steps.gate.outputs.proceed != 'true'
-        run: echo "Not a closed StegOps YES event. Exiting."
+        run: echo "Not a closed StegOps YES event (or next steps already sent). Exiting."
 
       - name: Ensure labels exist
         if: steps.gate.outputs.proceed == 'true'
@@ -63,6 +65,7 @@ jobs:
 
             await ensureLabel("qualified", "0e8a16", "Lead replied YES; ready for scope/pricing confirmation.");
             await ensureLabel("lead-logged", "5319e7", "Lead entry has been recorded in LEADS.md.");
+            await ensureLabel("next-steps-sent", "c2e0c6", "StegOps has sent next steps instructions.");
             await ensureLabel("no-response", "fbca04", "Auto-closed due to no response after follow-up.");
             await ensureLabel("stegops", "1d76db", "StegOps inbound / service request.");
 
@@ -152,4 +155,16 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body
+            });
+
+      - name: Set next-steps-sent label
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["next-steps-sent"]
             });
