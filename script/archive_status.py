@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
@@ -13,17 +14,16 @@ def _git_last_commit_epoch(repo: Path, rel_path: str) -> int | None:
     p = repo / rel_path
     if not p.exists():
         return None
-    # unix epoch seconds for last commit touching this path
     out = _run(["git", "log", "-1", "--format=%ct", "--", rel_path], cwd=repo)
     if not out:
         return None
     return int(out)
 
-def _read_watchlist(repo: Path, watchlist_path: Path) -> list[str]:
+def _read_watchlist(watchlist_path: Path) -> list[str]:
     if not watchlist_path.exists():
         return []
     lines = watchlist_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    items = []
+    items: list[str] = []
     for line in lines:
         s = line.strip()
         if not s or s.startswith("#"):
@@ -31,17 +31,54 @@ def _read_watchlist(repo: Path, watchlist_path: Path) -> list[str]:
         items.append(s)
     return items
 
-def write_status_md(repo: Path, status_md: Path, watchlist_path: Path, last_archive_epoch: int | None):
-    items = _read_watchlist(repo, watchlist_path)
+def _load_state(state_path: Path) -> dict:
+    if not state_path.exists():
+        return {
+            "last_run_utc": None,
+            "last_run_summary": "",
+            "last_run_counts": {"processed": 0, "archived": 0, "active": 0}
+        }
+    try:
+        return json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "last_run_utc": None,
+            "last_run_summary": "",
+            "last_run_counts": {"processed": 0, "archived": 0, "active": 0}
+        }
 
-    status_md.parent.mkdir(parents=True, exist_ok=True)
+def _save_state(state_path: Path, state: dict):
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
-    if last_archive_epoch is None:
-        last_archive_str = "None (no archive event yet)"
-    else:
-        dt = datetime.fromtimestamp(last_archive_epoch, tz=timezone.utc)
-        last_archive_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+def _fmt_utc(epoch: int | None) -> str:
+    if epoch is None:
+        return "None"
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+def write_status_md(
+    repo: Path,
+    status_md: Path,
+    watchlist_path: Path,
+    state_path: Path,
+    this_run_epoch: int,
+    this_run_counts: dict,
+    this_run_summary_lines: list[str],
+):
+    items = _read_watchlist(watchlist_path)
+
+    prev = _load_state(state_path)
+    prev_run_epoch = prev.get("last_run_utc")
+    prev_counts = prev.get("last_run_counts", {"processed": 0, "archived": 0, "active": 0})
+    prev_summary = (prev.get("last_run_summary") or "").strip()
+
+    def _get(d, k):
+        try:
+            return int(d.get(k, 0))
+        except Exception:
+            return 0
+
+    # Watched file status vs last run anchor
     rows = []
     for rel in items:
         ts = _git_last_commit_epoch(repo, rel)
@@ -49,23 +86,50 @@ def write_status_md(repo: Path, status_md: Path, watchlist_path: Path, last_arch
             rows.append((rel, "❓ MISSING", "—"))
             continue
 
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-        if last_archive_epoch is None:
+        dt = _fmt_utc(ts)
+        # Anchor is "last run time": if a file has not changed since that run, it's stale.
+        if ts >= this_run_epoch:
             rows.append((rel, "✅ UP TO DATE", dt))
         else:
-            if ts >= last_archive_epoch:
-                rows.append((rel, "✅ UP TO DATE", dt))
-            else:
-                rows.append((rel, "⚠️ STALE", dt))
+            rows.append((rel, "⚠️ STALE", dt))
 
-    # Render markdown
+    # Deltas since last run (based on stored state)
+    deltas = {
+        "processed": _get(this_run_counts, "processed") - _get(prev_counts, "processed"),
+        "archived": _get(this_run_counts, "archived") - _get(prev_counts, "archived"),
+        "active": _get(this_run_counts, "active") - _get(prev_counts, "active"),
+    }
+
+    status_md.parent.mkdir(parents=True, exist_ok=True)
+
     md = []
-    md.append("# StegArchive Status")
+    md.append("# StegOps-Orchestrator Status")
     md.append("")
-    md.append(f"- Last archive event: **{last_archive_str}**")
+    md.append(f"- **Last run (anchor):** {_fmt_utc(this_run_epoch)}")
+    md.append(f"- Previous run: {_fmt_utc(prev_run_epoch) if prev_run_epoch else 'None'}")
     md.append("")
-    md.append("## Watched files")
+    md.append("## Since last run")
+    md.append("")
+    md.append(f"- Processed: **{_get(this_run_counts, 'processed')}** (Δ {deltas['processed']:+d})")
+    md.append(f"- Archived: **{_get(this_run_counts, 'archived')}** (Δ {deltas['archived']:+d})")
+    md.append(f"- Active: **{_get(this_run_counts, 'active')}** (Δ {deltas['active']:+d})")
+    md.append("")
+    md.append("## This run summary")
+    md.append("")
+    if this_run_summary_lines:
+        for line in this_run_summary_lines[:2]:
+            md.append(f"- {line}")
+    else:
+        md.append("- No new inbox items this run.")
+    md.append("")
+
+    if prev_summary:
+        md.append("## Previous run summary (for continuity)")
+        md.append("")
+        md.append(f"- {prev_summary.splitlines()[0][:200]}")
+        md.append("")
+
+    md.append("## Watched files vs last run anchor")
     md.append("")
     md.append("| File | Status | Last change (git) |")
     md.append("|---|---:|---|")
@@ -76,3 +140,15 @@ def write_status_md(repo: Path, status_md: Path, watchlist_path: Path, last_arch
     md.append("")
 
     status_md.write_text("\n".join(md), encoding="utf-8")
+
+    # Persist state for next run
+    new_state = {
+        "last_run_utc": this_run_epoch,
+        "last_run_summary": "\n".join(this_run_summary_lines[:2]).strip(),
+        "last_run_counts": {
+            "processed": _get(this_run_counts, "processed"),
+            "archived": _get(this_run_counts, "archived"),
+            "active": _get(this_run_counts, "active"),
+        },
+    }
+    _save_state(state_path, new_state)
