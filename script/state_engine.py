@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-StegOps State Engine
+StegOps State Engine (with locking)
 
-Writes a single source of truth per customer engagement:
+Writes:
 - leads/issue-<n>/state.json
 - leads/issue-<n>/STATUS.md
 
-Runs from GitHub Actions using GITHUB_EVENT_PATH event payload.
+Locking:
+- Uses an atomic mkdir lock: leads/issue-<n>/.lock/
+- Prevents concurrent writes / retry races
 
-Design goals:
-- Idempotent (safe to run repeatedly)
-- No secrets required
-- GitHub-native (files + commits + labels)
+Runs from GitHub Actions using GITHUB_EVENT_PATH.
 """
 
 from __future__ import annotations
@@ -19,6 +18,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,10 +70,6 @@ def first_line(s: str, max_len: int = 160) -> str:
 
 
 def parse_service_from_issue_body(issue_body: str) -> Optional[str]:
-    """
-    Looks for the Issue Template dropdown text. This is intentionally simple and robust.
-    Returns: "monthly" | "audit" | None
-    """
     body = (issue_body or "").lower()
     if "monthly ops support" in body:
         return "monthly"
@@ -82,22 +79,15 @@ def parse_service_from_issue_body(issue_body: str) -> Optional[str]:
 
 
 def parse_intent_from_comment(comment_body: str) -> Tuple[bool, bool, bool]:
-    """
-    Returns (is_yes, is_accept, is_paid)
-    """
     c = (comment_body or "").strip().lower()
-
     is_yes = bool(re.match(r"^(yes|y|yep|yeah|sure|ok|okay|lets do it|let’s do it)\b", c))
     is_accept = bool(re.match(r"^(accept|accepted|i accept)\b", c))
     is_paid = bool(re.match(r"^(paid|payment sent|sent payment)\b", c))
-
     return is_yes, is_accept, is_paid
 
 
 def choose_amount_default(service: str) -> str:
-    if service == "monthly":
-        return "$99 / month"
-    return "$2,500 USD"
+    return "$99 / month" if service == "monthly" else "$2,500 USD"
 
 
 def state_rank(state: str) -> int:
@@ -123,6 +113,44 @@ def max_state(a: str, b: str) -> str:
 
 
 # ---------------------------
+# Locking (atomic mkdir)
+# ---------------------------
+
+class IssueLock:
+    """
+    Atomic lock via mkdir.
+    - acquire() creates lock dir
+    - release() removes it
+    """
+
+    def __init__(self, lock_dir: Path, timeout_sec: int = 30, poll_ms: int = 200) -> None:
+        self.lock_dir = lock_dir
+        self.timeout_sec = timeout_sec
+        self.poll_ms = poll_ms
+
+    def acquire(self) -> bool:
+        deadline = time.time() + self.timeout_sec
+        while time.time() < deadline:
+            try:
+                self.lock_dir.mkdir(parents=True, exist_ok=False)
+                # Write a small marker (who/when)
+                marker = self.lock_dir / "lock.json"
+                safe_write_json(marker, {
+                    "acquired_utc": utc_now_iso(),
+                    "runner": os.getenv("GITHUB_RUN_ID", "local"),
+                    "event": os.getenv("GITHUB_EVENT_NAME", "unknown"),
+                })
+                return True
+            except FileExistsError:
+                time.sleep(self.poll_ms / 1000.0)
+        return False
+
+    def release(self) -> None:
+        if self.lock_dir.exists():
+            shutil.rmtree(self.lock_dir, ignore_errors=True)
+
+
+# ---------------------------
 # Model
 # ---------------------------
 
@@ -136,7 +164,6 @@ class IssueContext:
     labels: List[str]
     body: str
     last_comment_body: Optional[str]
-    event_name: str
 
 
 def load_event(event_path: Path) -> Dict[str, Any]:
@@ -156,8 +183,6 @@ def extract_issue_context(event: Dict[str, Any]) -> IssueContext:
     body = issue.get("body") or ""
     last_comment_body = comment.get("body") if comment else None
 
-    event_name = os.getenv("GITHUB_EVENT_NAME", "unknown")
-
     return IssueContext(
         number=number,
         author=author,
@@ -167,7 +192,6 @@ def extract_issue_context(event: Dict[str, Any]) -> IssueContext:
         labels=labels,
         body=body,
         last_comment_body=last_comment_body,
-        event_name=event_name,
     )
 
 
@@ -176,26 +200,15 @@ def extract_issue_context(event: Dict[str, Any]) -> IssueContext:
 # ---------------------------
 
 def compute_next_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Compute and persist a stable engagement state.
-    - Only ever *advances* milestone timestamps when first observed.
-    - Allows closing states for no-response/closed.
-    """
     now = utc_now_iso()
-
-    # Base state
     current_state = prev.get("state") or "new"
 
-    # Service selection inference
     service = prev.get("service") or parse_service_from_issue_body(ctx.body) or "audit"
-
-    # If we later add explicit labels "monthly" or "audit", honor them:
     if "monthly" in ctx.labels:
         service = "monthly"
     if "audit" in ctx.labels:
         service = "audit"
 
-    # Track last seen metadata
     out: Dict[str, Any] = dict(prev) if prev else {}
     out.setdefault("issue", ctx.number)
     out.setdefault("customer", ctx.author)
@@ -207,57 +220,37 @@ def compute_next_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any
     out["labels"] = sorted(set(ctx.labels))
     out["updated_utc"] = now
 
-    # timestamps bucket
     ts = out.get("timestamps") or {}
     if not isinstance(ts, dict):
         ts = {}
     out["timestamps"] = ts
 
-    # Comment intent
     is_yes = is_accept = is_paid = False
     if ctx.last_comment_body is not None:
         is_yes, is_accept, is_paid = parse_intent_from_comment(ctx.last_comment_body)
 
-    # Determine milestone states from observed facts
     observed = "new"
-
-    # "replied" if there is any comment payload and it's on a stegops issue
     if ctx.last_comment_body is not None:
         observed = max_state(observed, "replied")
-
-    # qualified label OR YES implies qualified
     if "qualified" in ctx.labels or is_yes:
         observed = max_state(observed, "qualified")
-
-    # sow-generated label implies sow_generated
     if "sow-generated" in ctx.labels:
         observed = max_state(observed, "sow_generated")
-
-    # ACCEPT comment implies accepted
     if is_accept:
         observed = max_state(observed, "accepted")
-
-    # invoice-generated label implies invoice_generated
     if "invoice-generated" in ctx.labels:
         observed = max_state(observed, "invoice_generated")
-
-    # PAID comment implies paid
     if is_paid:
         observed = max_state(observed, "paid")
 
-    # Closing states
     if ctx.state == "closed":
-        # If it was auto-closed due to no response, mark explicitly
         if "no-response" in ctx.labels:
             observed = max_state(observed, "closed_no_response")
         else:
             observed = max_state(observed, "closed")
 
-    # Advance overall state monotonically
-    next_state = max_state(current_state, observed)
-    out["state"] = next_state
+    out["state"] = max_state(current_state, observed)
 
-    # Set milestone timestamps if newly reached
     def mark(milestone: str, condition: bool) -> None:
         if condition and milestone not in ts:
             ts[milestone] = now
@@ -273,7 +266,6 @@ def compute_next_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any
     if ctx.state == "closed" and "no-response" not in ctx.labels:
         mark("closed", True)
 
-    # Default pricing (used for STATUS display; can be overridden by your invoice workflow)
     out.setdefault("pricing_defaults", {})
     if not isinstance(out["pricing_defaults"], dict):
         out["pricing_defaults"] = {}
@@ -297,8 +289,6 @@ def render_status_md(state: Dict[str, Any]) -> str:
 
     pretty_service = "Monthly Ops Support" if service == "monthly" else "One-time AI Ops Audit"
 
-    # next step guidance by state
-    next_step = ""
     if s in ("new", "replied"):
         next_step = "Reply **YES** to proceed and include repo link(s)."
     elif s == "qualified":
@@ -306,15 +296,15 @@ def render_status_md(state: Dict[str, Any]) -> str:
     elif s == "sow_generated":
         next_step = "Reply **ACCEPT** to confirm scope and generate invoice."
     elif s == "accepted":
-        next_step = "Invoice should be generated automatically (or request `invoice`)."
+        next_step = "Invoice should be generated automatically."
     elif s == "invoice_generated":
         next_step = "Complete payment and reply **PAID**."
     elif s == "paid":
         next_step = "Engagement is active. Deliverables will be produced asynchronously."
-    elif s in ("closed_no_response", "closed"):
+    else:
         next_step = "Reply **YES** to reopen and continue."
 
-    md = f"""# Engagement Status
+    return f"""# Engagement Status
 
 **Issue:** #{issue} — {first_line(title)}
 **Customer:** @{customer}
@@ -344,7 +334,6 @@ def render_status_md(state: Dict[str, Any]) -> str:
 ## Next Step
 {next_step}
 """
-    return md
 
 
 def main() -> int:
@@ -356,7 +345,6 @@ def main() -> int:
     event = load_event(Path(event_path))
     ctx = extract_issue_context(event)
 
-    # Only operate when this is a StegOps issue
     if "stegops" not in ctx.labels:
         print("Not a stegops issue; skipping.")
         return 0
@@ -369,13 +357,20 @@ def main() -> int:
     state_path = lead_dir / "state.json"
     status_path = lead_dir / "STATUS.md"
 
-    prev = safe_read_json(state_path)
-    next_state_obj = compute_next_state(ctx, prev)
+    lock = IssueLock(lead_dir / ".lock", timeout_sec=45, poll_ms=250)
+    if not lock.acquire():
+        print("Could not acquire lock in time; exiting safely.")
+        return 0
 
-    safe_write_json(state_path, next_state_obj)
-    safe_write_text(status_path, render_status_md(next_state_obj))
+    try:
+        prev = safe_read_json(state_path)
+        next_state_obj = compute_next_state(ctx, prev)
+        safe_write_json(state_path, next_state_obj)
+        safe_write_text(status_path, render_status_md(next_state_obj))
+        print(f"Updated {state_path} and {status_path}")
+    finally:
+        lock.release()
 
-    print(f"Updated {state_path} and {status_path}")
     return 0
 
 
