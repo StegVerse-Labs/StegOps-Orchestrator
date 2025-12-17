@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 import os
+import sys
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+# --- Ensure repo root is on PYTHONPATH ---
+REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+# Now imports are guaranteed to work
 from script.archive_ai_entity import classify_text
 from script.archive_status import write_status_md
-
-REPO = Path(__file__).resolve().parents[1]
 
 INBOX = REPO / "inbox"
 ACTIVE_DIR = REPO / "processed" / "active"
@@ -20,10 +25,12 @@ WATCHLIST = REPO / "apps" / "routers" / "ARCHIVE" / "watchlist.txt"
 STATUS_MD = REPO / "apps" / "routers" / "ARCHIVE" / "STATUS.md"
 STATE_JSON = REPO / "apps" / "routers" / "ARCHIVE" / "run_state.json"
 
+
 def get_index_path() -> Path:
     if INDEX_PRIMARY.exists() or INDEX_PRIMARY.parent.exists():
         return INDEX_PRIMARY
     return INDEX_FALLBACK
+
 
 def ensure_dirs(index_path: Path):
     INBOX.mkdir(parents=True, exist_ok=True)
@@ -38,6 +45,7 @@ def ensure_dirs(index_path: Path):
             encoding="utf-8"
         )
 
+
 def append_log(index_path: Path, filename: str, result: dict, dest_rel: str):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     line = (
@@ -46,6 +54,7 @@ def append_log(index_path: Path, filename: str, result: dict, dest_rel: str):
     )
     with index_path.open("a", encoding="utf-8") as f:
         f.write(line)
+
 
 def main():
     if not os.getenv("OPENAI_API_KEY"):
@@ -59,7 +68,7 @@ def main():
     files = sorted(INBOX.glob("*.md"))
 
     counts = {"processed": 0, "archived": 0, "active": 0}
-    summary_lines: list[str] = []
+    summary_lines = []
 
     if not files:
         print("No .md files in inbox/. Nothing to do.")
@@ -82,7 +91,6 @@ def main():
         shutil.move(str(path), str(dest))
         dest_rel = f"processed/{result['classification']}/{dest.name}"
 
-        # Build 1–2 run summary statements
         tags = ",".join(result.get("tags", [])[:4])
         sline = (result.get("summary") or "").strip()
         if tags and sline:
@@ -93,9 +101,9 @@ def main():
         print(f"{path.name} => {result['classification']} tags={result['tags']} conf={result['confidence']:.2f}")
         append_log(index_path, dest.name, result, dest_rel)
 
-    # Status anchored to this run time + “since last run” + 1–2 summary statements
     write_status_md(REPO, STATUS_MD, WATCHLIST, STATE_JSON, this_run_epoch, counts, summary_lines)
     print(f"Wrote status: {STATUS_MD}")
+
 
 if __name__ == "__main__":
     main()
