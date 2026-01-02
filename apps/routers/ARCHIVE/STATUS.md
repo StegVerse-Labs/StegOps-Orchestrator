@@ -1,7 +1,7 @@
 # StegOps-Orchestrator Status
 
-- **Last run (anchor):** 2026-01-01 03:48:03 UTC
-- Previous run: 2025-12-31 03:24:49 UTC
+- **Last run (anchor):** 2026-01-02 03:28:21 UTC
+- Previous run: 2026-01-01 03:48:03 UTC
 
 ## Since last run
 
@@ -17,15 +17,15 @@
 
 | File | Status | Last change (git) |
 |---|---:|---|
-| `README.md` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `README_GMAIL.md` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `docs/RUNBOOK.md` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `docs/ONBOARDING_CHECKLIST.md` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `docs/REVENUE_PLAN_30D.md` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `docs/GMAIL_FULL_SETUP.md` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `script/archive_classifier.py` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `script/archive_ai_entity.py` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `script/archive_status.py` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
-| `.github/workflows/archive-manager.yml` | ⚠️ STALE | 2025-12-31 03:24:49 UTC |
+| `README.md` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `README_GMAIL.md` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `docs/RUNBOOK.md` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `docs/ONBOARDING_CHECKLIST.md` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `docs/REVENUE_PLAN_30D.md` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `docs/GMAIL_FULL_SETUP.md` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `script/archive_classifier.py` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `script/archive_ai_entity.py` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `script/archive_status.py` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
+| `.github/workflows/archive-manager.yml` | ⚠️ STALE | 2026-01-01 03:48:03 UTC |
 
 > Tip: Edit `apps/routers/ARCHIVE/watchlist.txt` to add/remove tracked files.
