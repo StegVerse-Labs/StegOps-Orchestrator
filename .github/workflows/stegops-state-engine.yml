@@ -9,7 +9,8 @@ on:
 
 permissions:
   contents: write
-  issues: read
+  issues: write
+  pull-requests: write
 
 concurrency:
   group: stegops-state-${{ github.event.issue.number || github.event.number || github.run_id }}
@@ -44,9 +45,6 @@ jobs:
           echo "## BCAT Runtime Status" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**BCAT_STATUS:** $BCAT_STATUS" >> $GITHUB_STEP_SUMMARY
-      - name: Run state engine
-        run: |
-          python script/state_engine.py
 
       - name: Refuse if BCAT denies
         if: env.BCAT_STATUS == 'DENIED'
@@ -67,18 +65,24 @@ jobs:
           echo "BCAT granted: mutation allowed."
           echo "MUTATION_ALLOWED=true" >> $GITHUB_ENV
 
+      - name: Run state engine
+        run: |
+          # If your repo uses script/ instead of scripts/, change this path accordingly.
+          python scripts/state_engine.py
+
       - name: Create PRs / dispatch mutation
         if: env.MUTATION_ALLOWED == 'true'
         run: |
           echo "Running mutating operations..."
           # your existing PR/dispatch logic here
-          
+
       - name: Commit state updates (if changed)
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "steg-ops-orchestrator-bot"
             git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
-            git add leads/
+            git add leads/ || true
+            git add . || true
             git commit -m "State: update engagement state (issue event)"
             git push
           else
