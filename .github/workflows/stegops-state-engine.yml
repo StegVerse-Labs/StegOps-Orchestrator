@@ -44,21 +44,18 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**BCAT_STATUS:** $BCAT_STATUS" >> $GITHUB_STEP_SUMMARY
 
-      # BCAT refusal-as-success must happen BEFORE any effects
       - name: Refuse if BCAT denies
         if: env.BCAT_STATUS == 'DENIED'
         run: |
           echo "BCAT refusal: status=DENIED. No action will be taken (refusal is success)."
           exit 0
 
-      # Set effect policy (CONSTRAINED = dry-run)
       - name: Set effect policy
         run: |
           if [ "$BCAT_STATUS" = "GRANTED" ]; then
             echo "DRY_RUN=false" >> $GITHUB_ENV
             echo "EXTERNAL_EFFECTS_ALLOWED=true" >> $GITHUB_ENV
           else
-            # CONSTRAINED
             echo "DRY_RUN=true" >> $GITHUB_ENV
             echo "EXTERNAL_EFFECTS_ALLOWED=false" >> $GITHUB_ENV
           fi
@@ -67,7 +64,12 @@ jobs:
         run: |
           python scripts/state_engine.py
 
-      # Optional: show what would be committed (works in both GRANTED and CONSTRAINED)
+      - name: Validate state outputs
+        id: outcheck
+        run: |
+          python scripts/validate_state_outputs.py
+          echo "OUTPUT_VALIDATION=passed" >> $GITHUB_ENV
+
       - name: Dry-run report (what changed)
         run: |
           echo "## State Engine Output" >> $GITHUB_STEP_SUMMARY
@@ -84,8 +86,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**DRY_RUN:** $DRY_RUN" >> $GITHUB_STEP_SUMMARY
           echo "**EXTERNAL_EFFECTS_ALLOWED:** $EXTERNAL_EFFECTS_ALLOWED" >> $GITHUB_STEP_SUMMARY
+          echo "**OUTPUT_VALIDATION:** passed" >> $GITHUB_STEP_SUMMARY
 
-      # Only push commits when external effects are allowed (GRANTED)
       - name: Commit state updates (if changed)
         if: env.EXTERNAL_EFFECTS_ALLOWED == 'true'
         run: |
@@ -100,7 +102,6 @@ jobs:
             echo "No changes to commit."
           fi
 
-      # Only do PRs/dispatch when external effects are allowed (GRANTED)
       - name: Create PRs / dispatch mutation
         if: env.EXTERNAL_EFFECTS_ALLOWED == 'true'
         run: |
