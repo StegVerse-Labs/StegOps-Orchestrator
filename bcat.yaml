@@ -1,0 +1,53 @@
+bcat_version: 1.0
+
+module:
+  name: StegOps-Orchestrator
+  type: automation
+  owner: StegVerse-Labs / Orchestrator Maintainers
+
+authority:
+  source: StegCore BCAT doctrine + StegCore governance gate
+  scope: |
+    Orchestrate StegVerse automation (dispatch, scanning, PR creation, repo hygiene),
+    while remaining boundary-conditioned, explainable, and revocable.
+  renewal_required: true
+
+trust_continuity:
+  assumptions:
+    - Tokens/secrets used by this repo remain least-privilege and scoped
+    - Dispatch targets are explicitly allowlisted (no implicit cross-repo reach)
+    - Inputs are validated and unsafe operations require explicit human review
+    - Orchestrator actions are auditable via Git history and workflow summaries
+  continuity_signals:
+    - BCAT Gate passes on PR/push and bcat.yaml is present
+    - No new cross-repo targets added without allowlist update
+    - Workflows emit a visible BCAT_STATUS (GRANTED/CONSTRAINED/DENIED)
+  break_conditions:
+    - Any cross-repo operation occurs without allowlist membership
+    - Any privileged token scope expands without doctrine-linked review
+    - Any workflow treats refusal as failure instead of explainable success
+    - Any “temporary bypass” exists without explicit sunset and audit trail
+
+boundary_conditions:
+  operational:
+    - Refuse if required secrets/vars are missing or invalid
+    - Refuse if target repo is not allowlisted
+    - Refuse if action would mutate without an auditable PR trail (unless explicitly approved)
+  temporal:
+    - Constrain if run occurs outside defined maintenance window (if configured)
+    - Constrain if repeated failures indicate boundary pressure (rate limits, API errors)
+  contextual:
+    - Refuse if environment/context mismatch is detected (e.g., intended main vs other branch)
+    - Constrain if running in unknown/untested context (e.g., fork PR without permissions)
+
+degradation_behavior:
+  modes: [constrain, refuse]
+  explanation_required: true
+
+human_accountability:
+  custodian: Orchestrator Maintainers
+  escalation_path: GitHub Issues in StegOps-Orchestrator + ping StegCore maintainers for boundary changes
+
+non_action_policy:
+  refusal_is_success: true
+  explanation_required: true
