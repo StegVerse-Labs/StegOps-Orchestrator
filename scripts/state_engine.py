@@ -213,18 +213,29 @@ _Last updated: {s.get('updated_utc')}_
 
 def main():
     event_path = os.getenv("GITHUB_EVENT_PATH")
-    if not event_path: return
-    event = json.loads(Path(event_path).read_text())
+    if not event_path:
+        return
+
+    event = json.loads(Path(event_path).read_text(encoding="utf-8"))
     ctx = extract_ctx(event)
-    if "stegops" not in ctx.labels or ctx.number <= 0: return
+    if "stegops" not in ctx.labels or ctx.number <= 0:
+        return
 
     base = Path("leads") / f"issue-{ctx.number}"
     lock = IssueLock(base / ".lock")
-    if not lock.acquire(): return
+    if not lock.acquire():
+        return
+
     try:
-        prev = safe_read_json(base / "state.json")
+        state_path = base / "state.json"
+        prev = safe_read_json(state_path)
+
+        # Snapshot previous state for validator / audit (only if it existed)
+        if state_path.exists():
+            safe_write_text(base / "state.prev.json", state_path.read_text(encoding="utf-8"))
+
         nxt = compute_state(ctx, prev)
-        safe_write_json(base / "state.json", nxt)
+        safe_write_json(state_path, nxt)
         safe_write_text(base / "STATUS.md", render_status(nxt))
     finally:
         lock.release()
