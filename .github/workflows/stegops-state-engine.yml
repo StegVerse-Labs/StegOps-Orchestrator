@@ -33,12 +33,10 @@ jobs:
         run: pip install pyyaml
 
       - name: Validate BCAT + compute status
-        id: bcat
         run: |
           python scripts/validate_bcat.py bcat.yaml
           STATUS=$(python scripts/bcat_status.py bcat.yaml)
           echo "BCAT_STATUS=$STATUS" >> $GITHUB_ENV
-          echo "bcat_status=$STATUS" >> $GITHUB_OUTPUT
 
       - name: BCAT Summary
         run: |
@@ -46,37 +44,50 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**BCAT_STATUS:** $BCAT_STATUS" >> $GITHUB_STEP_SUMMARY
 
+      # BCAT refusal-as-success must happen BEFORE any effects
       - name: Refuse if BCAT denies
         if: env.BCAT_STATUS == 'DENIED'
         run: |
           echo "BCAT refusal: status=DENIED. No action will be taken (refusal is success)."
           exit 0
 
-      - name: Force constrained mode
-        if: env.BCAT_STATUS == 'CONSTRAINED'
+      # Set effect policy (CONSTRAINED = dry-run)
+      - name: Set effect policy
         run: |
-          echo "BCAT constrained: forcing DRY_RUN=true and disabling mutation."
-          echo "DRY_RUN=true" >> $GITHUB_ENV
-          echo "MUTATION_ALLOWED=false" >> $GITHUB_ENV
-
-      - name: Granted mode
-        if: env.BCAT_STATUS == 'GRANTED'
-        run: |
-          echo "BCAT granted: mutation allowed."
-          echo "MUTATION_ALLOWED=true" >> $GITHUB_ENV
+          if [ "$BCAT_STATUS" = "GRANTED" ]; then
+            echo "DRY_RUN=false" >> $GITHUB_ENV
+            echo "EXTERNAL_EFFECTS_ALLOWED=true" >> $GITHUB_ENV
+          else
+            # CONSTRAINED
+            echo "DRY_RUN=true" >> $GITHUB_ENV
+            echo "EXTERNAL_EFFECTS_ALLOWED=false" >> $GITHUB_ENV
+          fi
 
       - name: Run state engine
         run: |
-          # If your repo uses script/ instead of scripts/, change this path accordingly.
           python scripts/state_engine.py
 
-      - name: Create PRs / dispatch mutation
-        if: env.MUTATION_ALLOWED == 'true'
+      # Optional: show what would be committed (works in both GRANTED and CONSTRAINED)
+      - name: Dry-run report (what changed)
         run: |
-          echo "Running mutating operations..."
-          # your existing PR/dispatch logic here
+          echo "## State Engine Output" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "**Working tree changed:** yes" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            git status --porcelain >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Working tree changed:** no" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**DRY_RUN:** $DRY_RUN" >> $GITHUB_STEP_SUMMARY
+          echo "**EXTERNAL_EFFECTS_ALLOWED:** $EXTERNAL_EFFECTS_ALLOWED" >> $GITHUB_STEP_SUMMARY
 
+      # Only push commits when external effects are allowed (GRANTED)
       - name: Commit state updates (if changed)
+        if: env.EXTERNAL_EFFECTS_ALLOWED == 'true'
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "steg-ops-orchestrator-bot"
@@ -88,3 +99,10 @@ jobs:
           else
             echo "No changes to commit."
           fi
+
+      # Only do PRs/dispatch when external effects are allowed (GRANTED)
+      - name: Create PRs / dispatch mutation
+        if: env.EXTERNAL_EFFECTS_ALLOWED == 'true'
+        run: |
+          echo "Running external effects (PRs/dispatch)..."
+          # your existing PR/dispatch logic here
