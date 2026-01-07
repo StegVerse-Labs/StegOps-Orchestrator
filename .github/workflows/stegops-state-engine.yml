@@ -28,10 +28,51 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install deps (BCAT)
+        run: pip install pyyaml
+
+      - name: Validate BCAT + compute status
+        id: bcat
+        run: |
+          python scripts/validate_bcat.py bcat.yaml
+          STATUS=$(python scripts/bcat_status.py bcat.yaml)
+          echo "BCAT_STATUS=$STATUS" >> $GITHUB_ENV
+          echo "bcat_status=$STATUS" >> $GITHUB_OUTPUT
+
+      - name: BCAT Summary
+        run: |
+          echo "## BCAT Runtime Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**BCAT_STATUS:** $BCAT_STATUS" >> $GITHUB_STEP_SUMMARY
       - name: Run state engine
         run: |
           python script/state_engine.py
 
+      - name: Refuse if BCAT denies
+        if: env.BCAT_STATUS == 'DENIED'
+        run: |
+          echo "BCAT refusal: status=DENIED. No action will be taken (refusal is success)."
+          exit 0
+
+      - name: Force constrained mode
+        if: env.BCAT_STATUS == 'CONSTRAINED'
+        run: |
+          echo "BCAT constrained: forcing DRY_RUN=true and disabling mutation."
+          echo "DRY_RUN=true" >> $GITHUB_ENV
+          echo "MUTATION_ALLOWED=false" >> $GITHUB_ENV
+
+      - name: Granted mode
+        if: env.BCAT_STATUS == 'GRANTED'
+        run: |
+          echo "BCAT granted: mutation allowed."
+          echo "MUTATION_ALLOWED=true" >> $GITHUB_ENV
+
+      - name: Create PRs / dispatch mutation
+        if: env.MUTATION_ALLOWED == 'true'
+        run: |
+          echo "Running mutating operations..."
+          # your existing PR/dispatch logic here
+          
       - name: Commit state updates (if changed)
         run: |
           if [ -n "$(git status --porcelain)" ]; then
