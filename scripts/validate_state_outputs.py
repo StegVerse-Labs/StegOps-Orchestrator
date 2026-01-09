@@ -8,14 +8,13 @@ Validates ONLY the current issue directory based on GITHUB_EVENT_PATH:
 Checks:
 - Only allowed paths changed (default: leads/issue-<N>/...)
 - state.json exists, valid JSON, required keys present
-- state.json.issue matches issue number
-- state.json.issue_url (if present) looks like an issue URL
-- STATUS.md exists, non-empty, and references the issue number and state
-- State does not regress compared to previous state.json (if previous exists)
-
-Exit codes:
-0 = ok
-1 = validation failed
+- schema_version present + correct
+- state is known + does not regress compared to state.prev.json (if present)
+- service is monthly|audit only
+- STATUS.md exists, non-empty, references issue + correct state marker
+- private_workspace link exists IFF state is deliverables_ready|deliverables_pushed
+- verify-payment is two-factor: label verify-payment present AND comment intent from authorized actor
+  (validator enforces label requirement; comment/auth enforced by state engine)
 """
 
 from __future__ import annotations
@@ -25,9 +24,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-# Keep aligned with scripts/state_engine.py
 STATE_ORDER = [
     "new","replied","qualified","sow_generated","accepted","invoice_generated",
     "payment_claimed","verify_payment","payment_verified",
@@ -36,15 +34,14 @@ STATE_ORDER = [
 ]
 STATE_RANK = {s: i for i, s in enumerate(STATE_ORDER)}
 
-REQUIRED_KEYS = ["issue", "customer", "state", "updated_utc", "service"]
+REQUIRED_KEYS = ["schema_version","issue","customer","state","updated_utc","service","labels","reasons"]
 
-# By default, ONLY allow changes within the current issue directory.
-# You can extend this allowlist later if needed.
-ALLOWED_EXTRA_PATH_PREFIXES: List[str] = [
-    # ".github/",  # uncomment only if you intentionally want workflow files to change at runtime (rare)
-]
+ALLOWED_SERVICES = {"monthly","audit"}
 
 ISSUE_URL_RE = re.compile(r"^https://github\.com/[^/]+/[^/]+/issues/\d+/?$")
+WORKSPACE_RE = re.compile(r"^https://github\.com/StegVerse-Labs/StegOps-Deliverables/tree/main/clients/issue-\d+/?$")
+
+ALLOWED_EXTRA_PATH_PREFIXES: List[str] = []
 
 def fail(msg: str) -> None:
     print("STATE OUTPUT VALIDATION: FAILED")
@@ -74,7 +71,6 @@ def get_issue_number_from_event() -> int:
     issue = event.get("issue") or {}
     n = issue.get("number")
     if not n:
-        # Some events use github.event.number; but our triggers are issues & issue_comment.
         fail("Event payload missing issue.number")
     try:
         return int(n)
@@ -82,14 +78,12 @@ def get_issue_number_from_event() -> int:
         fail("issue.number is not an int")
 
 def git_changed_files() -> List[str]:
-    # Porcelain is stable for parsing
     try:
         out = subprocess.check_output(["git", "status", "--porcelain"], text=True)
     except Exception as e:
         fail(f"Unable to run git status: {e}")
     files = []
     for line in out.splitlines():
-        # Format: XY <path>
         if len(line) < 4:
             continue
         path = line[3:].strip()
@@ -103,9 +97,7 @@ def state_rank(s: str) -> int:
 def validate_only_allowed_paths(issue_dir: str) -> None:
     changed = git_changed_files()
     if not changed:
-        # It's okay to have no changes: engine may no-op.
         return
-
     allowed_prefix = issue_dir.rstrip("/") + "/"
     for p in changed:
         if p.startswith(allowed_prefix):
@@ -131,26 +123,51 @@ def validate_state_json(issue_dir: Path, issue_num: int) -> Dict[str, Any]:
         if k not in data:
             fail(f"{state_path} missing required key: {k}")
 
-    # Issue number must match folder and event
+    if int(data.get("schema_version")) != 1:
+        fail(f"{state_path} schema_version must be 1")
+
     if int(data.get("issue")) != int(issue_num):
         fail(f"{state_path} issue mismatch: expected {issue_num}, got {data.get('issue')}")
 
-    # State must be known
     st = str(data.get("state") or "")
     if st not in STATE_RANK:
         fail(f"{state_path} has unknown state: {st}")
 
-    # updated_utc should look ISO-ish (very loose check)
+    svc = str(data.get("service") or "")
+    if svc not in ALLOWED_SERVICES:
+        fail(f"{state_path} service must be one of {sorted(ALLOWED_SERVICES)} (got {svc})")
+
     updated = str(data.get("updated_utc") or "")
     if "T" not in updated or not updated.endswith("Z"):
         fail(f"{state_path} updated_utc not in expected Zulu-ish ISO format: {updated}")
 
-    # Optional: issue_url sanity
     issue_url = data.get("issue_url")
     if isinstance(issue_url, str) and issue_url.strip():
         u = issue_url.strip()
         if not ISSUE_URL_RE.match(u):
             fail(f"{state_path} issue_url does not look like a GitHub issue URL: {u}")
+
+    labels = data.get("labels")
+    if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
+        fail(f"{state_path} labels must be a list[str]")
+
+    reasons = data.get("reasons")
+    if not isinstance(reasons, list) or not all(isinstance(x, str) and x.strip() for x in reasons):
+        fail(f"{state_path} reasons must be a non-empty list[str]")
+
+    # Workspace link rule
+    pw = data.get("private_workspace")
+    if st in {"deliverables_ready","deliverables_pushed"}:
+        if not isinstance(pw, str) or not WORKSPACE_RE.match(pw.strip()):
+            fail(f"{state_path} private_workspace must be a valid Deliverables link when state={st}")
+    else:
+        if pw is not None:
+            fail(f"{state_path} private_workspace must be null unless state is deliverables_ready|deliverables_pushed")
+
+    # Two-factor verify-payment: if state indicates verified or beyond, label must include verify-payment
+    if st in {"payment_verified","deliverables_ready","deliverables_pushed"}:
+        if "verify-payment" not in set(labels):
+            fail(f"{state_path} state={st} requires label 'verify-payment' (two-factor verify)")
 
     return data
 
@@ -160,22 +177,16 @@ def validate_status_md(issue_dir: Path, issue_num: int, state: str) -> None:
         fail(f"Missing {status_path}")
 
     txt = status_path.read_text(encoding="utf-8").strip()
-    if len(txt) < 40:
+    if len(txt) < 60:
         fail(f"{status_path} is too short/empty")
 
-    # Must mention issue number
     if f"#{issue_num}" not in txt:
         fail(f"{status_path} does not reference issue #{issue_num}")
 
-    # Must contain a state line with the computed state
-    # Your renderer uses: **State:** `<state>`
     if f"**State:** `{state}`" not in txt:
         fail(f"{status_path} does not contain expected state marker for `{state}`")
 
 def validate_no_regression(issue_dir: Path, current: Dict[str, Any]) -> None:
-    # Compare with previous if available in git history (HEAD~1) OR via working tree backup.
-    # We'll do a simple local check: if a .prev_state.json exists, compare.
-    # (Optional future: fetch from git show if needed.)
     prev_path = issue_dir / "state.prev.json"
     if not prev_path.exists():
         return
@@ -195,12 +206,11 @@ def main() -> None:
     issue_num = get_issue_number_from_event()
     issue_dir = Path("leads") / f"issue-{issue_num}"
 
-    # Enforce that only this issue directory is dirtied
     validate_only_allowed_paths(str(issue_dir))
 
-    # If directory doesn't exist, treat as OK no-op (engine may have early-returned)
+    # If it didn't produce outputs, treat as OK no-op (e.g., missing stegops label).
     if not issue_dir.exists():
-        ok(f"No-op: {issue_dir} does not exist (likely missing 'stegops' label or issue number)")
+        ok(f"No-op: {issue_dir} does not exist")
 
     data = validate_state_json(issue_dir, issue_num)
     validate_status_md(issue_dir, issue_num, str(data.get("state")))
