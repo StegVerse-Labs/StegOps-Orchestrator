@@ -2,17 +2,54 @@
 """
 StegOps State Engine
 - locking
-- payment verification
+- payment verification (two-factor: label + authorized comment intent)
 - deliverables states
 - private workspace link (read-only, no secrets)
+- schema_version + reasons for long-term auditability
+- idempotent writes to avoid noisy commits
 """
 
 from __future__ import annotations
-import json, os, re, shutil, time
+import hashlib
+import json
+import os
+import re
+import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# ---------------------------
+# Label constants (single source of truth)
+# ---------------------------
+
+LABEL_STEGOPS = "stegops"
+LABEL_MONTHLY = "monthly"
+LABEL_AUDIT = "audit"
+LABEL_QUALIFIED = "qualified"
+LABEL_SOW = "sow-generated"
+LABEL_INVOICE = "invoice-generated"
+LABEL_PAYMENT_CLAIMED = "payment-claimed"
+LABEL_DELIVERABLES_PUSHED = "deliverables-pushed"
+
+# Two-factor verify payment: requires this label PLUS authorized comment intent
+LABEL_VERIFY_PAYMENT = "verify-payment"
+
+# ---------------------------
+# State model
+# ---------------------------
+
+STATE_ORDER = [
+    "new","replied","qualified","sow_generated","accepted","invoice_generated",
+    "payment_claimed","verify_payment","payment_verified",
+    "deliverables_ready","deliverables_pushed",
+    "closed_no_response","closed",
+]
+STATE_RANK = {s: i for i, s in enumerate(STATE_ORDER)}
+
+SCHEMA_VERSION = 1
 
 # ---------------------------
 # Helpers
@@ -22,9 +59,12 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 def safe_read_json(path: Path) -> Dict[str, Any]:
-    if not path.exists(): return {}
-    try: return json.loads(path.read_text(encoding="utf-8"))
-    except Exception: return {}
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 def safe_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,6 +73,10 @@ def safe_write_text(path: Path, text: str) -> None:
 def safe_write_json(path: Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+def canonical_hash(obj: Dict[str, Any]) -> str:
+    s = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 def norm_labels(labels: List[Dict[str, Any]]) -> List[str]:
     return sorted({(l.get("name") or "").strip() for l in labels or [] if l.get("name")})
@@ -43,8 +87,10 @@ def first_line(s: str, max_len: int = 160) -> str:
 
 def parse_service_from_issue_body(body: str) -> Optional[str]:
     b = (body or "").lower()
-    if "monthly ops support" in b: return "monthly"
-    if "one-time ai ops audit" in b: return "audit"
+    if "monthly ops support" in b:
+        return "monthly"
+    if "one-time ai ops audit" in b:
+        return "audit"
     return None
 
 def parse_comment_intents(body: str) -> Tuple[bool, bool, bool, bool]:
@@ -63,13 +109,7 @@ def is_authorized_assoc(a: str) -> bool:
     return (a or "").upper() in {"OWNER", "MEMBER", "COLLABORATOR"}
 
 def state_rank(s: str) -> int:
-    order = [
-        "new","replied","qualified","sow_generated","accepted","invoice_generated",
-        "payment_claimed","verify_payment","payment_verified",
-        "deliverables_ready","deliverables_pushed",
-        "closed_no_response","closed",
-    ]
-    return order.index(s) if s in order else 0
+    return STATE_RANK.get(s, 0)
 
 def max_state(a: str, b: str) -> str:
     return a if state_rank(a) >= state_rank(b) else b
@@ -81,6 +121,7 @@ def max_state(a: str, b: str) -> str:
 class IssueLock:
     def __init__(self, d: Path, timeout=45, poll=250):
         self.d, self.timeout, self.poll = d, timeout, poll
+
     def acquire(self) -> bool:
         end = time.time() + self.timeout
         while time.time() < end:
@@ -91,8 +132,10 @@ class IssueLock:
             except FileExistsError:
                 time.sleep(self.poll / 1000)
         return False
+
     def release(self):
-        if self.d.exists(): shutil.rmtree(self.d, ignore_errors=True)
+        if self.d.exists():
+            shutil.rmtree(self.d, ignore_errors=True)
 
 # ---------------------------
 # Context
@@ -104,7 +147,7 @@ class IssueContext:
     author: str
     title: str
     url: str
-    state: str
+    state: str          # open / closed
     labels: List[str]
     body: str
     comment: Optional[str]
@@ -130,14 +173,21 @@ def extract_ctx(event: Dict[str, Any]) -> IssueContext:
 
 def compute_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any]:
     now = utc_now_iso()
-    s = prev.get("state") or "new"
+    reasons: List[str] = []
+    prev_state = (prev.get("state") or "new") if prev else "new"
 
+    # Source of truth: labels > previous > body inference (only as fallback)
     service = prev.get("service") or parse_service_from_issue_body(ctx.body) or "audit"
-    if "monthly" in ctx.labels: service = "monthly"
-    if "audit" in ctx.labels: service = "audit"
+    if LABEL_MONTHLY in ctx.labels:
+        service = "monthly"
+        reasons.append("service_labeled_monthly")
+    if LABEL_AUDIT in ctx.labels:
+        service = "audit"
+        reasons.append("service_labeled_audit")
 
     out = dict(prev) if prev else {}
     out.update({
+        "schema_version": SCHEMA_VERSION,
         "issue": ctx.number,
         "customer": ctx.author,
         "issue_url": ctx.url,
@@ -148,43 +198,90 @@ def compute_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any]:
     })
 
     ts = out.setdefault("timestamps", {})
-    yes, accept, paid, verify = (False, False, False, False)
+    yes = accept = paid = verify_intent = False
     if ctx.comment:
-        yes, accept, paid, verify = parse_comment_intents(ctx.comment)
+        yes, accept, paid, verify_intent = parse_comment_intents(ctx.comment)
+        reasons.append("comment_detected")
 
     observed = "new"
-    if ctx.comment: observed = max_state(observed, "replied")
-    if "qualified" in ctx.labels or yes: observed = max_state(observed, "qualified")
-    if "sow-generated" in ctx.labels: observed = max_state(observed, "sow_generated")
-    if accept: observed = max_state(observed, "accepted")
-    if "invoice-generated" in ctx.labels: observed = max_state(observed, "invoice_generated")
-    if paid or "payment-claimed" in ctx.labels:
+
+    if ctx.comment:
+        observed = max_state(observed, "replied")
+        reasons.append("observed_replied")
+
+    if LABEL_QUALIFIED in ctx.labels or yes:
+        observed = max_state(observed, "qualified")
+        reasons.append("observed_qualified")
+
+    if LABEL_SOW in ctx.labels:
+        observed = max_state(observed, "sow_generated")
+        reasons.append("observed_sow_generated")
+
+    if accept:
+        observed = max_state(observed, "accepted")
+        reasons.append("observed_accepted")
+
+    if LABEL_INVOICE in ctx.labels:
+        observed = max_state(observed, "invoice_generated")
+        reasons.append("observed_invoice_generated")
+
+    if paid or LABEL_PAYMENT_CLAIMED in ctx.labels:
         observed = max_state(observed, "payment_claimed")
         observed = max_state(observed, "verify_payment")
-    if verify and is_authorized_assoc(ctx.assoc):
+        reasons.append("observed_payment_claimed")
+
+    # Two-factor verify payment:
+    #  1) authorized association
+    #  2) comment intent "verify payment"
+    #  3) label "verify-payment" present
+    verify_authorized = verify_intent and is_authorized_assoc(ctx.assoc) and (LABEL_VERIFY_PAYMENT in ctx.labels)
+    if verify_authorized:
         observed = max_state(observed, "payment_verified")
         observed = max_state(observed, "deliverables_ready")
-    if "deliverables-pushed" in ctx.labels:
+        reasons.append("observed_payment_verified_two_factor")
+
+    if LABEL_DELIVERABLES_PUSHED in ctx.labels:
         observed = max_state(observed, "deliverables_pushed")
+        reasons.append("observed_deliverables_pushed")
 
-    out["state"] = max_state(s, observed)
+    # Explicit close handling
+    if (ctx.state or "").lower() == "closed":
+        # If they never made it past replied/qualified/etc., you can decide to mark no-response.
+        # Conservative rule: if still early, mark closed_no_response; else closed.
+        early_threshold = state_rank("qualified")
+        if state_rank(prev_state) <= early_threshold and state_rank(observed) <= early_threshold:
+            observed = max_state(observed, "closed_no_response")
+            reasons.append("observed_closed_no_response")
+        else:
+            observed = max_state(observed, "closed")
+            reasons.append("observed_closed")
 
-    def mark(k, cond):
-        if cond and k not in ts: ts[k] = now
+    out["state"] = max_state(prev_state, observed)
 
-    mark("qualified", "qualified" in ctx.labels or yes)
+    def mark(k: str, cond: bool):
+        if cond and k not in ts:
+            ts[k] = now
+
+    mark("qualified", (LABEL_QUALIFIED in ctx.labels) or yes)
     mark("accepted", accept)
-    mark("invoice_generated", "invoice-generated" in ctx.labels)
-    mark("payment_claimed", paid or "payment-claimed" in ctx.labels)
-    mark("payment_verified", verify and is_authorized_assoc(ctx.assoc))
-    mark("deliverables_pushed", "deliverables-pushed" in ctx.labels)
+    mark("invoice_generated", LABEL_INVOICE in ctx.labels)
+    mark("payment_claimed", paid or (LABEL_PAYMENT_CLAIMED in ctx.labels))
+    mark("payment_verified", verify_authorized)
+    mark("deliverables_pushed", LABEL_DELIVERABLES_PUSHED in ctx.labels)
 
     out.setdefault("pricing_defaults", {})["suggested_amount"] = choose_amount_default(service)
+
+    # Workspace link rule: only when ready/pushed
     out["private_workspace"] = (
         f"https://github.com/StegVerse-Labs/StegOps-Deliverables/tree/main/clients/issue-{ctx.number}"
-        if out["state"] in {"deliverables_ready","deliverables_pushed"}
+        if out["state"] in {"deliverables_ready", "deliverables_pushed"}
         else None
     )
+
+    # Reasons for auditability
+    # Keep unique + stable ordering
+    out["reasons"] = sorted(set(reasons))
+
     return out
 
 # ---------------------------
@@ -194,6 +291,11 @@ def compute_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any]:
 def render_status(s: Dict[str, Any]) -> str:
     pw = s.get("private_workspace")
     link = f"\n🔒 **Private Workspace:** {pw}\n" if pw else ""
+    reasons = s.get("reasons") or []
+    reasons_block = ""
+    if reasons:
+        reasons_block = "\n**Reasons:**\n" + "\n".join([f"- {r}" for r in reasons]) + "\n"
+
     return f"""# Engagement Status
 
 **Issue:** #{s.get('issue')} — {first_line(s.get('issue_title'))}
@@ -202,7 +304,7 @@ def render_status(s: Dict[str, Any]) -> str:
 **Service:** {'Monthly Ops Support' if s.get('service')=='monthly' else 'One-time AI Ops Audit'}
 **Default Amount:** {s.get('pricing_defaults',{}).get('suggested_amount')}
 
-{link}
+{link}{reasons_block}
 
 _Last updated: {s.get('updated_utc')}_
 """
@@ -218,7 +320,9 @@ def main():
 
     event = json.loads(Path(event_path).read_text(encoding="utf-8"))
     ctx = extract_ctx(event)
-    if "stegops" not in ctx.labels or ctx.number <= 0:
+
+    # Fast no-op guard
+    if LABEL_STEGOPS not in ctx.labels or ctx.number <= 0:
         return
 
     base = Path("leads") / f"issue-{ctx.number}"
@@ -230,13 +334,22 @@ def main():
         state_path = base / "state.json"
         prev = safe_read_json(state_path)
 
-        # Snapshot previous state for validator / audit (only if it existed)
+        nxt = compute_state(ctx, prev)
+
+        # Idempotent write: only write files if meaningful state object changes
+        prev_hash = canonical_hash(prev) if prev else ""
+        nxt_hash = canonical_hash(nxt)
+
+        if prev_hash == nxt_hash:
+            return
+
+        # Snapshot previous state for validation / audit (only if existed)
         if state_path.exists():
             safe_write_text(base / "state.prev.json", state_path.read_text(encoding="utf-8"))
 
-        nxt = compute_state(ctx, prev)
         safe_write_json(state_path, nxt)
         safe_write_text(base / "STATUS.md", render_status(nxt))
+
     finally:
         lock.release()
 
