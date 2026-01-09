@@ -7,18 +7,18 @@ on:
     types: [created]
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-
 concurrency:
   group: stegops-state-${{ github.event.issue.number || github.event.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   state-engine:
+    # Workflow-level guard: only run when issue has the stegops label
+    if: github.event.issue && contains(join(github.event.issue.labels.*.name, ','), 'stegops')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: read
 
     steps:
       - name: Checkout
@@ -29,8 +29,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (BCAT)
+      - name: Install deps (BCAT + validators)
         run: pip install pyyaml
+
+      - name: Compute issue vars
+        run: |
+          echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+          echo "ISSUE_DIR=leads/issue-${{ github.event.issue.number }}" >> $GITHUB_ENV
 
       - name: Validate BCAT + compute status
         run: |
@@ -64,19 +69,16 @@ jobs:
         run: |
           python scripts/state_engine.py
 
-      - name: Validate state outputs
-        id: outcheck
+      - name: Validate state outputs (tight)
         run: |
           python scripts/validate_state_outputs.py
-          echo "OUTPUT_VALIDATION=passed" >> $GITHUB_ENV
 
-      - name: Dry-run report (what changed)
+      - name: Report (what changed)
         run: |
           echo "## State Engine Output" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ -n "$(git status --porcelain)" ]; then
             echo "**Working tree changed:** yes" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
             git status --porcelain >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
@@ -86,24 +88,32 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**DRY_RUN:** $DRY_RUN" >> $GITHUB_STEP_SUMMARY
           echo "**EXTERNAL_EFFECTS_ALLOWED:** $EXTERNAL_EFFECTS_ALLOWED" >> $GITHUB_STEP_SUMMARY
-          echo "**OUTPUT_VALIDATION:** passed" >> $GITHUB_STEP_SUMMARY
 
-      - name: Commit state updates (if changed)
+      - name: Commit state updates (scoped, granted only)
         if: env.EXTERNAL_EFFECTS_ALLOWED == 'true'
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "steg-ops-orchestrator-bot"
             git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
-            git add leads/ || true
-            git add . || true
-            git commit -m "State: update engagement state (issue event)"
-            git push
+            # Only ever commit within this issue folder
+            git add "$ISSUE_DIR/state.json" "$ISSUE_DIR/STATUS.md" "$ISSUE_DIR/state.prev.json" 2>/dev/null || true
+            if [ -n "$(git status --porcelain)" ]; then
+              git commit -m "State: update engagement state (issue #$ISSUE_NUMBER)"
+              git push
+            else
+              echo "Nothing staged after scoping; skipping commit."
+            fi
           else
             echo "No changes to commit."
           fi
 
-      - name: Create PRs / dispatch mutation
-        if: env.EXTERNAL_EFFECTS_ALLOWED == 'true'
-        run: |
-          echo "Running external effects (PRs/dispatch)..."
-          # your existing PR/dispatch logic here
+  external-effects:
+    needs: [state-engine]
+    if: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - run: echo "Placeholder: move PR creation / repo dispatch here later for least-privilege separation."
