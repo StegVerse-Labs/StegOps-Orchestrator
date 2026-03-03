@@ -185,6 +185,12 @@ def compute_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any]:
         service = "audit"
         reasons.append("service_labeled_audit")
 
+    # ✅ Step 1: Prevent conflicting service labels (future drift killer)
+    if (LABEL_MONTHLY in ctx.labels) and (LABEL_AUDIT in ctx.labels):
+        reasons.append("service_label_conflict")
+        if prev.get("service") in {"monthly", "audit"}:
+            service = prev["service"]
+
     out = dict(prev) if prev else {}
     out.update({
         "schema_version": SCHEMA_VERSION,
@@ -246,8 +252,6 @@ def compute_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any]:
 
     # Explicit close handling
     if (ctx.state or "").lower() == "closed":
-        # If they never made it past replied/qualified/etc., you can decide to mark no-response.
-        # Conservative rule: if still early, mark closed_no_response; else closed.
         early_threshold = state_rank("qualified")
         if state_rank(prev_state) <= early_threshold and state_rank(observed) <= early_threshold:
             observed = max_state(observed, "closed_no_response")
@@ -271,15 +275,12 @@ def compute_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any]:
 
     out.setdefault("pricing_defaults", {})["suggested_amount"] = choose_amount_default(service)
 
-    # Workspace link rule: only when ready/pushed
     out["private_workspace"] = (
         f"https://github.com/StegVerse-Labs/StegOps-Deliverables/tree/main/clients/issue-{ctx.number}"
         if out["state"] in {"deliverables_ready", "deliverables_pushed"}
         else None
     )
 
-    # Reasons for auditability
-    # Keep unique + stable ordering
     out["reasons"] = sorted(set(reasons))
 
     return out
@@ -321,7 +322,6 @@ def main():
     event = json.loads(Path(event_path).read_text(encoding="utf-8"))
     ctx = extract_ctx(event)
 
-    # Fast no-op guard
     if LABEL_STEGOPS not in ctx.labels or ctx.number <= 0:
         return
 
@@ -336,14 +336,12 @@ def main():
 
         nxt = compute_state(ctx, prev)
 
-        # Idempotent write: only write files if meaningful state object changes
         prev_hash = canonical_hash(prev) if prev else ""
         nxt_hash = canonical_hash(nxt)
 
         if prev_hash == nxt_hash:
             return
 
-        # Snapshot previous state for validation / audit (only if existed)
         if state_path.exists():
             safe_write_text(base / "state.prev.json", state_path.read_text(encoding="utf-8"))
 
