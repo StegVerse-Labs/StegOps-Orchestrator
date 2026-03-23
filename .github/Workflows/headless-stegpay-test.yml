@@ -1,0 +1,184 @@
+name: Headless StegPay Bootstrap Test
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/headless-stegpay-bootstrap.yml"
+      - "scripts/state_engine.py"
+      - "scripts/verify_envelope.py"
+      - "scripts/event_ledger.py"
+      - "trusted_keys.json"
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install pynacl
+
+      - name: Generate signed test payload
+        run: |
+          mkdir -p test_payload
+
+          python << 'EOF'
+import json
+import base64
+import uuid
+from pathlib import Path
+from nacl.signing import SigningKey
+
+sk = SigningKey.generate()
+pk = sk.verify_key
+public_b64 = base64.b64encode(pk.encode()).decode()
+
+trusted = {
+    "steg-root-test-v1": {
+        "issuer": "stegpay-test-001",
+        "public_key": public_b64,
+        "status": "active"
+    }
+}
+
+Path("trusted_keys.json").write_text(
+    json.dumps(trusted, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+event = {
+    "event_id": str(uuid.uuid4()),
+    "event_type": "payment_verified",
+    "issue": 1,
+    "provider": "stripe",
+    "provider_id": "pi_test_123",
+    "amount": 2500,
+    "currency": "usd",
+    "verified_utc": "2026-03-22T21:10:00Z",
+    "service": "audit"
+}
+
+canonical = json.dumps(
+    event,
+    sort_keys=True,
+    separators=(",", ":"),
+).encode("utf-8")
+
+sig = sk.sign(canonical).signature
+sig_b64 = base64.b64encode(sig).decode()
+
+envelope = {
+    "schema_version": 1,
+    "envelope_type": "stegverse_event",
+    "event": event,
+    "issuer": {
+        "id": "stegpay-test-001",
+        "key_id": "steg-root-test-v1"
+    },
+    "signature": {
+        "algorithm": "ed25519",
+        "value": sig_b64
+    }
+}
+
+dispatch_event = {
+    "action": "stegpay-payment-verified",
+    "client_payload": envelope
+}
+
+Path("test_payload/envelope.json").write_text(
+    json.dumps(envelope, indent=2) + "\n",
+    encoding="utf-8"
+)
+
+Path("test_payload/final_event.json").write_text(
+    json.dumps(dispatch_event, indent=2) + "\n",
+    encoding="utf-8"
+)
+EOF
+
+      - name: Run state engine headlessly
+        env:
+          GITHUB_EVENT_NAME: repository_dispatch
+          GITHUB_EVENT_PATH: test_payload/final_event.json
+        run: |
+          python scripts/state_engine.py
+
+      - name: Print outputs
+        run: |
+          echo "==== FILE TREE ===="
+          find leads || true
+
+          echo "==== ENVELOPE ===="
+          cat test_payload/envelope.json || true
+
+          echo "==== EVENT ===="
+          cat test_payload/final_event.json || true
+
+          echo "==== STATE ===="
+          cat leads/issue-1/state.json || true
+
+          echo "==== STATUS ===="
+          cat leads/issue-1/STATUS.md || true
+
+          echo "==== LEDGER ===="
+          cat leads/issue-1/ledger.jsonl || true
+
+      - name: Write summary
+        run: |
+          echo "## Headless StegPay Bootstrap Test" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Target issue:** 1" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f leads/issue-1/state.json ]; then
+            echo "### state.json" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat leads/issue-1/state.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "state.json not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -f leads/issue-1/STATUS.md ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### STATUS.md" >> "$GITHUB_STEP_SUMMARY"
+            echo '```md' >> "$GITHUB_STEP_SUMMARY"
+            cat leads/issue-1/STATUS.md >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "STATUS.md not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -f leads/issue-1/ledger.jsonl ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### ledger.jsonl" >> "$GITHUB_STEP_SUMMARY"
+            echo '```jsonl' >> "$GITHUB_STEP_SUMMARY"
+            cat leads/issue-1/ledger.jsonl >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ledger.jsonl not found" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stegops-headless-bootstrap-output
+          path: |
+            leads/
+            test_payload/
+            trusted_keys.json
+          if-no-files-found: warn
