@@ -10,7 +10,7 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: stegops-state-${{ github.event.issue.number || github.event.client_payload.issue || github.event.number || github.run_id }}
+  group: stegops-state-${{ github.event.issue.number || github.event.client_payload.event.issue || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -22,6 +22,7 @@ jobs:
         contains(join(github.event.issue.labels.*.name, ','), 'stegops')
       )
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
       issues: read
@@ -35,19 +36,31 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (BCAT + validators)
+      - name: Install deps
         run: pip install pyyaml
 
+      # ---------------------------
+      # Resolve issue context (FIXED)
+      # ---------------------------
       - name: Compute issue vars
         run: |
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "ISSUE_NUMBER=${{ github.event.client_payload.issue }}" >> $GITHUB_ENV
-            echo "ISSUE_DIR=leads/issue-${{ github.event.client_payload.issue }}" >> $GITHUB_ENV
+            ISSUE="${{ github.event.client_payload.event.issue }}"
           else
-            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
-            echo "ISSUE_DIR=leads/issue-${{ github.event.issue.number }}" >> $GITHUB_ENV
+            ISSUE="${{ github.event.issue.number }}"
           fi
 
+          if [ -z "$ISSUE" ]; then
+            echo "❌ ISSUE_NUMBER missing"
+            exit 1
+          fi
+
+          echo "ISSUE_NUMBER=$ISSUE" >> $GITHUB_ENV
+          echo "ISSUE_DIR=leads/issue-$ISSUE" >> $GITHUB_ENV
+
+      # ---------------------------
+      # BCAT
+      # ---------------------------
       - name: Validate BCAT + compute status
         run: |
           python scripts/validate_bcat.py bcat.yaml
@@ -65,7 +78,7 @@ jobs:
       - name: Refuse if BCAT denies
         if: env.BCAT_STATUS == 'DENIED'
         run: |
-          echo "BCAT refusal: status=DENIED. No action will be taken (refusal is success)."
+          echo "BCAT refusal: status=DENIED"
           exit 0
 
       - name: Set effect policy
@@ -78,18 +91,26 @@ jobs:
             echo "EXTERNAL_EFFECTS_ALLOWED=false" >> $GITHUB_ENV
           fi
 
+      # ---------------------------
+      # Run engine
+      # ---------------------------
       - name: Run state engine
-        run: |
-          python scripts/state_engine.py
+        run: python scripts/state_engine.py
 
-      - name: Validate state outputs (tight)
-        run: |
-          python scripts/validate_state_outputs.py
+      # ---------------------------
+      # Validation
+      # ---------------------------
+      - name: Validate state outputs
+        run: python scripts/validate_state_outputs.py
 
-      - name: Report (what changed)
+      # ---------------------------
+      # Report
+      # ---------------------------
+      - name: Report changes
         run: |
           echo "## State Engine Output" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+
           if [ -n "$(git status --porcelain)" ]; then
             echo "**Working tree changed:** yes" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
@@ -98,27 +119,36 @@ jobs:
           else
             echo "**Working tree changed:** no" >> $GITHUB_STEP_SUMMARY
           fi
+
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**DRY_RUN:** $DRY_RUN" >> $GITHUB_STEP_SUMMARY
           echo "**EXTERNAL_EFFECTS_ALLOWED:** $EXTERNAL_EFFECTS_ALLOWED" >> $GITHUB_STEP_SUMMARY
 
-      - name: Commit state updates (scoped, granted only)
+      # ---------------------------
+      # Commit (scoped + safe)
+      # ---------------------------
+      - name: Commit state updates
         if: env.EXTERNAL_EFFECTS_ALLOWED == 'true'
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "steg-ops-orchestrator-bot"
             git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
+
             git add "$ISSUE_DIR/state.json" "$ISSUE_DIR/STATUS.md" "$ISSUE_DIR/state.prev.json" 2>/dev/null || true
+
             if [ -n "$(git status --porcelain)" ]; then
               git commit -m "State: update engagement state (issue #$ISSUE_NUMBER)"
               git push
             else
-              echo "Nothing staged after scoping; skipping commit."
+              echo "Nothing staged after scoping"
             fi
           else
-            echo "No changes to commit."
+            echo "No changes to commit"
           fi
 
+  # ---------------------------
+  # Future separation of mutation
+  # ---------------------------
   external-effects:
     needs: [state-engine]
     if: false
@@ -128,4 +158,4 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      - run: echo "Placeholder: move PR creation / repo dispatch here later for least-privilege separation."
+      - run: echo "Future: isolate mutations for least-privilege"
