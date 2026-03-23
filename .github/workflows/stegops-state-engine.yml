@@ -5,16 +5,22 @@ on:
     types: [opened, edited, labeled, reopened, closed]
   issue_comment:
     types: [created]
+  repository_dispatch:
+    types: [stegpay-payment-verified]
   workflow_dispatch: {}
 
 concurrency:
-  group: stegops-state-${{ github.event.issue.number || github.event.number || github.run_id }}
+  group: stegops-state-${{ github.event.issue.number || github.event.client_payload.issue || github.event.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   state-engine:
-    # Workflow-level guard: only run when issue has the stegops label
-    if: github.event.issue && contains(join(github.event.issue.labels.*.name, ','), 'stegops')
+    if: |
+      github.event_name == 'repository_dispatch' ||
+      (
+        github.event.issue != null &&
+        contains(join(github.event.issue.labels.*.name, ','), 'stegops')
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -34,8 +40,13 @@ jobs:
 
       - name: Compute issue vars
         run: |
-          echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
-          echo "ISSUE_DIR=leads/issue-${{ github.event.issue.number }}" >> $GITHUB_ENV
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "ISSUE_NUMBER=${{ github.event.client_payload.issue }}" >> $GITHUB_ENV
+            echo "ISSUE_DIR=leads/issue-${{ github.event.client_payload.issue }}" >> $GITHUB_ENV
+          else
+            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+            echo "ISSUE_DIR=leads/issue-${{ github.event.issue.number }}" >> $GITHUB_ENV
+          fi
 
       - name: Validate BCAT + compute status
         run: |
@@ -48,6 +59,8 @@ jobs:
           echo "## BCAT Runtime Status" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**BCAT_STATUS:** $BCAT_STATUS" >> $GITHUB_STEP_SUMMARY
+          echo "**Event:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Issue:** $ISSUE_NUMBER" >> $GITHUB_STEP_SUMMARY
 
       - name: Refuse if BCAT denies
         if: env.BCAT_STATUS == 'DENIED'
@@ -95,7 +108,6 @@ jobs:
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "steg-ops-orchestrator-bot"
             git config user.email "steg-ops-orchestrator-bot@users.noreply.github.com"
-            # Only ever commit within this issue folder
             git add "$ISSUE_DIR/state.json" "$ISSUE_DIR/STATUS.md" "$ISSUE_DIR/state.prev.json" 2>/dev/null || true
             if [ -n "$(git status --porcelain)" ]; then
               git commit -m "State: update engagement state (issue #$ISSUE_NUMBER)"
