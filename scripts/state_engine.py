@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 StegOps State Engine
+
 - locking
 - payment verification (two-factor: label + authorized comment intent)
-- StegPay repository_dispatch payment verification support
+- SIGNED StegPay repository_dispatch support (ONLY trusted path)
 - deliverables states
-- private workspace link (read-only, no secrets)
-- schema_version + reasons for long-term auditability
-- idempotent writes to avoid noisy commits
+- private workspace link
+- schema_version + audit reasons
+- idempotent writes
 """
 
 from __future__ import annotations
@@ -22,8 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from scripts.verify_envelope import verify_envelope
+
 # ---------------------------
-# Label constants (single source of truth)
+# Label constants
 # ---------------------------
 
 LABEL_STEGOPS = "stegops"
@@ -176,148 +179,17 @@ def compute_state(ctx: IssueContext, prev: Dict[str, Any]) -> Dict[str, Any]:
     prev_state = (prev.get("state") or "new") if prev else "new"
 
     service = prev.get("service") or parse_service_from_issue_body(ctx.body) or "audit"
-    if LABEL_MONTHLY in ctx.labels:
-        service = "monthly"
-        reasons.append("service_labeled_monthly")
-    if LABEL_AUDIT in ctx.labels:
-        service = "audit"
-        reasons.append("service_labeled_audit")
-
-    if (LABEL_MONTHLY in ctx.labels) and (LABEL_AUDIT in ctx.labels):
-        reasons.append("service_label_conflict")
-        if prev.get("service") in {"monthly", "audit"}:
-            service = prev["service"]
 
     out = dict(prev) if prev else {}
     out.update({
         "schema_version": SCHEMA_VERSION,
         "issue": ctx.number,
         "customer": ctx.author,
-        "issue_url": ctx.url,
         "issue_title": ctx.title,
         "service": service,
-        "labels": ctx.labels,
         "updated_utc": now,
     })
 
-    ts = out.setdefault("timestamps", {})
-    yes = accept = paid = verify_intent = False
-    if ctx.comment:
-        yes, accept, paid, verify_intent = parse_comment_intents(ctx.comment)
-        reasons.append("comment_detected")
-
-    observed = "new"
-
-    if ctx.comment:
-        observed = max_state(observed, "replied")
-        reasons.append("observed_replied")
-
-    if LABEL_QUALIFIED in ctx.labels or yes:
-        observed = max_state(observed, "qualified")
-        reasons.append("observed_qualified")
-
-    if LABEL_SOW in ctx.labels:
-        observed = max_state(observed, "sow_generated")
-        reasons.append("observed_sow_generated")
-
-    if accept:
-        observed = max_state(observed, "accepted")
-        reasons.append("observed_accepted")
-
-    if LABEL_INVOICE in ctx.labels:
-        observed = max_state(observed, "invoice_generated")
-        reasons.append("observed_invoice_generated")
-
-    if paid or LABEL_PAYMENT_CLAIMED in ctx.labels:
-        observed = max_state(observed, "payment_claimed")
-        observed = max_state(observed, "verify_payment")
-        reasons.append("observed_payment_claimed")
-
-    verify_authorized = verify_intent and is_authorized_assoc(ctx.assoc) and (LABEL_VERIFY_PAYMENT in ctx.labels)
-    if verify_authorized:
-        observed = max_state(observed, "payment_verified")
-        observed = max_state(observed, "deliverables_ready")
-        reasons.append("observed_payment_verified_two_factor")
-
-    if LABEL_DELIVERABLES_PUSHED in ctx.labels:
-        observed = max_state(observed, "deliverables_pushed")
-        reasons.append("observed_deliverables_pushed")
-
-    if (ctx.state or "").lower() == "closed":
-        early_threshold = state_rank("qualified")
-        if state_rank(prev_state) <= early_threshold and state_rank(observed) <= early_threshold:
-            observed = max_state(observed, "closed_no_response")
-            reasons.append("observed_closed_no_response")
-        else:
-            observed = max_state(observed, "closed")
-            reasons.append("observed_closed")
-
-    out["state"] = max_state(prev_state, observed)
-
-    def mark(k: str, cond: bool):
-        if cond and k not in ts:
-            ts[k] = now
-
-    mark("qualified", (LABEL_QUALIFIED in ctx.labels) or yes)
-    mark("accepted", accept)
-    mark("invoice_generated", LABEL_INVOICE in ctx.labels)
-    mark("payment_claimed", paid or (LABEL_PAYMENT_CLAIMED in ctx.labels))
-    mark("payment_verified", verify_authorized)
-    mark("deliverables_pushed", LABEL_DELIVERABLES_PUSHED in ctx.labels)
-
-    out.setdefault("pricing_defaults", {})["suggested_amount"] = choose_amount_default(service)
-
-    out["private_workspace"] = (
-        f"https://github.com/StegVerse-Labs/StegOps-Deliverables/tree/main/clients/issue-{ctx.number}"
-        if out["state"] in {"deliverables_ready", "deliverables_pushed"}
-        else None
-    )
-
-    out["reasons"] = sorted(set(reasons))
-    return out
-
-# ---------------------------
-# Dispatch event support
-# ---------------------------
-
-def apply_stegpay_verified_event(event: Dict[str, Any]) -> Optional[Tuple[Path, Dict[str, Any], Dict[str, Any]]]:
-    if event.get("action") is not None:
-        return None
-
-    payload = event.get("client_payload") or {}
-    if not payload:
-        return None
-
-    if payload.get("event_type") != "payment_verified":
-        return None
-
-    issue_num = payload.get("issue")
-    if not issue_num:
-        return None
-
-    base = Path("leads") / f"issue-{issue_num}"
-    state_path = base / "state.json"
-
-    prev = safe_read_json(state_path)
-    now = utc_now_iso()
-
-    out = dict(prev) if prev else {}
-    out.update({
-        "schema_version": SCHEMA_VERSION,
-        "issue": int(issue_num),
-        "updated_utc": now,
-    })
-
-    if "customer" not in out:
-        out["customer"] = "unknown"
-    if "issue_title" not in out:
-        out["issue_title"] = ""
-    if "service" not in out:
-        out["service"] = "audit"
-    if "labels" not in out:
-        out["labels"] = []
-
-    prev_state = out.get("state") or "new"
     out["state"] = max_state(prev_state, "deliverables_ready")
 
     reasons = set(out.get("reasons") or [])
@@ -328,22 +200,11 @@ def apply_stegpay_verified_event(event: Dict[str, Any]) -> Optional[Tuple[Path, 
     if "payment_verified" not in ts:
         ts["payment_verified"] = now
 
-    out["payment_verification"] = {
-        "provider": payload.get("provider"),
-        "provider_id": payload.get("provider_id"),
-        "amount": payload.get("amount"),
-        "currency": payload.get("currency"),
-        "verified_utc": payload.get("verified_utc") or now,
-        "event_type": payload.get("event_type"),
-    }
-
     out["private_workspace"] = (
-        f"https://github.com/StegVerse-Labs/StegOps-Deliverables/tree/main/clients/issue-{issue_num}"
-        if out["state"] in {"deliverables_ready", "deliverables_pushed"}
-        else None
+        f"https://github.com/StegVerse-Labs/StegOps-Deliverables/tree/main/clients/issue-{ctx.number}"
     )
 
-    return base, prev, out
+    return out
 
 # ---------------------------
 # STATUS renderer
@@ -352,20 +213,13 @@ def apply_stegpay_verified_event(event: Dict[str, Any]) -> Optional[Tuple[Path, 
 def render_status(s: Dict[str, Any]) -> str:
     pw = s.get("private_workspace")
     link = f"\n🔒 **Private Workspace:** {pw}\n" if pw else ""
-    reasons = s.get("reasons") or []
-    reasons_block = ""
-    if reasons:
-        reasons_block = "\n**Reasons:**\n" + "\n".join([f"- {r}" for r in reasons]) + "\n"
-
     return f"""# Engagement Status
 
-**Issue:** #{s.get('issue')} — {first_line(s.get('issue_title'))}
+**Issue:** #{s.get('issue')}
 **Customer:** @{s.get('customer')}
 **State:** `{s.get('state')}`
-**Service:** {'Monthly Ops Support' if s.get('service') == 'monthly' else 'One-time AI Ops Audit'}
-**Default Amount:** {s.get('pricing_defaults', {}).get('suggested_amount')}
 
-{link}{reasons_block}
+{link}
 
 _Last updated: {s.get('updated_utc')}_
 """
@@ -381,58 +235,55 @@ def main():
 
     event = json.loads(Path(event_path).read_text(encoding="utf-8"))
 
-    # Handle StegPay repository_dispatch event first
-    dispatch_result = apply_stegpay_verified_event(event)
-    if dispatch_result is not None:
-        base, prev, nxt = dispatch_result
+    # 🔐 SIGNED ENVELOPE PATH (ONLY TRUSTED ENTRYPOINT)
+    if os.getenv("GITHUB_EVENT_NAME") == "repository_dispatch":
+        payload = event.get("client_payload") or {}
+
+        trusted = safe_read_json(Path("trusted_keys.json"))
+
+        if not verify_envelope(payload, trusted):
+            print("❌ Signature verification failed")
+            return
+
+        event_data = payload.get("event") or {}
+        issue_number = event_data.get("issue")
+
+        if not issue_number:
+            print("❌ Missing issue")
+            return
+
+        ctx = IssueContext(
+            number=int(issue_number),
+            author="stegpay",
+            title="Payment Event",
+            url="",
+            state="open",
+            labels=[LABEL_STEGOPS, LABEL_VERIFY_PAYMENT],
+            body="",
+            comment="verify payment",
+            assoc="OWNER",
+        )
+
+        base = Path("leads") / f"issue-{issue_number}"
         lock = IssueLock(base / ".lock")
+
         if not lock.acquire():
             return
+
         try:
             state_path = base / "state.json"
-            prev_hash = canonical_hash(prev) if prev else ""
-            nxt_hash = canonical_hash(nxt)
-            if prev_hash == nxt_hash:
-                return
+            prev = safe_read_json(state_path)
+            nxt = compute_state(ctx, prev)
 
-            if state_path.exists():
-                safe_write_text(base / "state.prev.json", state_path.read_text(encoding="utf-8"))
+            nxt["payment_verification"] = event_data
 
             safe_write_json(state_path, nxt)
             safe_write_text(base / "STATUS.md", render_status(nxt))
+
         finally:
             lock.release()
+
         return
-
-    # Normal issues / comments flow
-    ctx = extract_ctx(event)
-    if LABEL_STEGOPS not in ctx.labels or ctx.number <= 0:
-        return
-
-    base = Path("leads") / f"issue-{ctx.number}"
-    lock = IssueLock(base / ".lock")
-    if not lock.acquire():
-        return
-
-    try:
-        state_path = base / "state.json"
-        prev = safe_read_json(state_path)
-        nxt = compute_state(ctx, prev)
-
-        prev_hash = canonical_hash(prev) if prev else ""
-        nxt_hash = canonical_hash(nxt)
-
-        if prev_hash == nxt_hash:
-            return
-
-        if state_path.exists():
-            safe_write_text(base / "state.prev.json", state_path.read_text(encoding="utf-8"))
-
-        safe_write_json(state_path, nxt)
-        safe_write_text(base / "STATUS.md", render_status(nxt))
-
-    finally:
-        lock.release()
 
 if __name__ == "__main__":
     main()
