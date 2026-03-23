@@ -5,6 +5,10 @@ Tight output validation for StegOps state engine.
 Validates ONLY the current issue directory based on GITHUB_EVENT_PATH:
   leads/issue-<N>/
 
+Supports:
+- issues / issue_comment events
+- repository_dispatch events (e.g. stegpay-payment-verified)
+
 Checks:
 - Only allowed paths changed (default: leads/issue-<N>/...)
 - state.json exists, valid JSON, required keys present
@@ -13,8 +17,8 @@ Checks:
 - service is monthly|audit only
 - STATUS.md exists, non-empty, references issue + correct state marker
 - private_workspace link exists IFF state is deliverables_ready|deliverables_pushed
-- verify-payment is two-factor: label verify-payment present AND comment intent from authorized actor
-  (validator enforces label requirement; comment/auth enforced by state engine)
+- verify-payment label is required for manual verified states
+- stegpay_verified_event allows verified states without manual label
 """
 
 from __future__ import annotations
@@ -59,19 +63,29 @@ def load_json(p: Path) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-def get_issue_number_from_event() -> int:
+def load_event() -> Dict[str, Any]:
     event_path = os.getenv("GITHUB_EVENT_PATH")
     if not event_path:
         fail("GITHUB_EVENT_PATH not set")
     try:
-        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        return json.loads(Path(event_path).read_text(encoding="utf-8"))
     except Exception as e:
         fail(f"Unable to read event payload: {e}")
 
+def get_issue_number_from_event(event: Dict[str, Any]) -> int:
+    # repository_dispatch path
+    payload = event.get("client_payload") or {}
+    if payload.get("issue") is not None:
+        try:
+            return int(payload["issue"])
+        except Exception:
+            fail("client_payload.issue is not an int")
+
+    # normal issues / issue_comment path
     issue = event.get("issue") or {}
     n = issue.get("number")
-    if not n:
-        fail("Event payload missing issue.number")
+    if n is None:
+        fail("Event payload missing issue.number / client_payload.issue")
     try:
         return int(n)
     except Exception:
@@ -164,10 +178,19 @@ def validate_state_json(issue_dir: Path, issue_num: int) -> Dict[str, Any]:
         if pw is not None:
             fail(f"{state_path} private_workspace must be null unless state is deliverables_ready|deliverables_pushed")
 
-    # Two-factor verify-payment: if state indicates verified or beyond, label must include verify-payment
+    # Verified-state rule:
+    # - manual path requires verify-payment label
+    # - StegPay path is allowed if reason includes stegpay_verified_event
+    reasons_set = set(reasons)
+    labels_set = set(labels)
+
     if st in {"payment_verified","deliverables_ready","deliverables_pushed"}:
-        if "verify-payment" not in set(labels):
-            fail(f"{state_path} state={st} requires label 'verify-payment' (two-factor verify)")
+        if "stegpay_verified_event" not in reasons_set and "verify-payment" not in labels_set:
+            fail(
+                f"{state_path} state={st} requires either "
+                "'verify-payment' label (manual two-factor path) or "
+                "'stegpay_verified_event' reason (StegPay path)"
+            )
 
     return data
 
@@ -203,12 +226,12 @@ def validate_no_regression(issue_dir: Path, current: Dict[str, Any]) -> None:
             fail(f"State regression detected: {prev_state} -> {cur_state}")
 
 def main() -> None:
-    issue_num = get_issue_number_from_event()
+    event = load_event()
+    issue_num = get_issue_number_from_event(event)
     issue_dir = Path("leads") / f"issue-{issue_num}"
 
     validate_only_allowed_paths(str(issue_dir))
 
-    # If it didn't produce outputs, treat as OK no-op (e.g., missing stegops label).
     if not issue_dir.exists():
         ok(f"No-op: {issue_dir} does not exist")
 
