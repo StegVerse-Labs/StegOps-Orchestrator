@@ -1,0 +1,7 @@
+{
+  "steg-root-v1": {
+    "issuer": "stegpay-prod-001",
+    "public_key": "PUT_YOUR_BASE64_PUBLIC_KEY_HERE",
+    "status": "active"
+  }
+}
